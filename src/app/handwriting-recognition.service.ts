@@ -95,10 +95,12 @@ export class HandwritingRecognitionService {
             hasSubstrokes: !!data.substrokes,
             sampleChars: data.chars ? data.chars.slice(0, 20).map((c: any) => c[0]).join('') : 'none'
           });
-          // Check if 大 is in the database
+          // Check if common characters are in the database
           if (data.chars) {
             const daIndex = data.chars.findIndex((c: any) => c[0] === '大');
+            const wenIndex = data.chars.findIndex((c: any) => c[0] === '文');
             console.log('Character 大 found in database:', daIndex !== -1, daIndex !== -1 ? `at index ${daIndex}` : 'not found');
+            console.log('Character 文 found in database:', wenIndex !== -1, wenIndex !== -1 ? `at index ${wenIndex}` : 'not found');
           }
         } else {
           console.warn('HanziLookup data not found');
@@ -277,6 +279,40 @@ export class HandwritingRecognitionService {
   }
 
   /**
+   * Calculate optimal looseness parameter for matching
+   * Based on stroke count, character complexity, and matching context
+   */
+  private calculateLooseness(strokeCount: number, isDrawAhead: boolean = false): number {
+    // Optimized looseness values for better accuracy
+    // Lower values = stricter matching (more accurate), higher = more lenient (more false positives)
+    // Start with tighter matching for better accuracy
+    let baseLooseness = 0.14;
+    
+    // Adjust based on stroke count
+    // Tighter matching for simple characters, slightly more lenient for complex ones
+    if (strokeCount >= 5) {
+      baseLooseness = 0.15; // Complex characters can use slightly more leniency
+    } else if (strokeCount >= 4) {
+      baseLooseness = 0.145; // 4 strokes like 文
+    } else if (strokeCount === 3) {
+      baseLooseness = 0.14; // 3 strokes like 大 - tight matching for accuracy
+    } else if (strokeCount === 2) {
+      baseLooseness = 0.135; // 2 strokes - very tight for accuracy
+    } else if (strokeCount === 1) {
+      baseLooseness = 0.13; // Single strokes need very precise matching
+    }
+    
+    // Draw-ahead (partial recognition) needs slightly more leniency
+    // since we're matching incomplete characters
+    if (isDrawAhead) {
+      baseLooseness += 0.005; // Small increase for partial matches
+    }
+    
+    // Clamp to reasonable range - keep it tight for accuracy
+    return Math.max(0.12, Math.min(0.17, baseLooseness));
+  }
+
+  /**
    * Client-side stroke-based recognition
    * Uses HanziLookupJS as primary method, falls back to basic matching
    * Strokes format: [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
@@ -297,14 +333,30 @@ export class HandwritingRecognitionService {
     if (this.isReady()) {
       return new Observable<RecognitionResult>(observer => {
         try {
+          // Validate normalized strokes before passing to HanziLookup
+          if (!normalizedStrokes || normalizedStrokes.length === 0) {
+            console.error('No normalized strokes to analyze');
+            this.fallbackRecognition(normalizedStrokes, strokes.length).subscribe(observer);
+            return;
+          }
+          
+          // Ensure all strokes are valid (non-empty arrays with at least 2 points)
+          const validStrokes = normalizedStrokes.filter(stroke => 
+            stroke && Array.isArray(stroke) && stroke.length >= 2
+          );
+          
+          if (validStrokes.length === 0) {
+            console.error('No valid strokes after validation');
+            this.fallbackRecognition(normalizedStrokes, strokes.length).subscribe(observer);
+            return;
+          }
+          
           // Normalized strokes are in format [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
           // Create AnalyzedCharacter from strokes
-          const analyzedChar = new HanziLookup.AnalyzedCharacter(normalizedStrokes);
+          const analyzedChar = new HanziLookup.AnalyzedCharacter(validStrokes);
           
-          // Create Matcher with the dataset name
-          // For complete characters (3+ strokes), use slightly looser matching to catch characters like 大
-          // For partial characters, use default looseness
-          const looseness = normalizedStrokes.length >= 3 ? 0.16 : 0.15;
+          // Create Matcher with optimal looseness based on stroke characteristics
+          const looseness = this.calculateLooseness(validStrokes.length, false);
           const matcher = new HanziLookup.Matcher('mmah', looseness);
           
           console.log('Calling HanziLookup.Matcher.match with strokes:', {
@@ -315,13 +367,29 @@ export class HandwritingRecognitionService {
             looseness: looseness
           });
 
-          // Call match with max 300 results to ensure we get common characters like 大
-          // Complete characters sometimes rank lower, so we need to search deeper
-          matcher.match(analyzedChar, 300, (results: Array<{character: string, score: number}>) => {
+          // Call match with sufficient results to get good matches
+          // Request more results to ensure we catch common characters that might rank lower
+          matcher.match(analyzedChar, 500, (results: Array<{character: string, score: number}>) => {
             console.log('HanziLookup.Matcher.match callback called with results:', results?.length || 0, results);
             // Log all results to help debug
             if (results && results.length > 0) {
-              console.log('All recognition results:', results.map(r => `${r.character} (score: ${r.score !== -Infinity && r.score !== Infinity && !isNaN(r.score) ? r.score.toFixed(2) : 'invalid'})`).join(', '));
+              // Check score ordering - log first few and last few to understand sorting
+              console.log('First 5 results:', results.slice(0, 5).map(r => `${r.character}(${r.score})`).join(', '));
+              console.log('Last 5 results:', results.slice(-5).map(r => `${r.character}(${r.score})`).join(', '));
+              
+              // Check for common characters in results
+              const commonChars = ['大', '文', '人', '中', '一', '二', '三'];
+              commonChars.forEach(char => {
+                const index = results.findIndex(r => r.character === char);
+                if (index !== -1) {
+                  const score = results[index].score;
+                  const firstScore = results[0].score;
+                  const lastScore = results[results.length - 1].score;
+                  console.log(`Common character ${char} found at position ${index} with score ${score} (first: ${firstScore}, last: ${lastScore})`);
+                } else {
+                  console.log(`Common character ${char} NOT found in top ${results.length} results`);
+                }
+              });
             }
             if (results && results.length > 0) {
               // Filter out results with invalid scores
@@ -338,21 +406,19 @@ export class HandwritingRecognitionService {
                 return;
               }
               
-              // Convert scores to confidence (HanziLookupJS uses lower scores for better matches)
-              // Normalize scores: best match gets highest confidence
-              const maxScore = validResults[0].score;
-              const minScore = validResults[validResults.length - 1].score;
-              const scoreRange = maxScore - minScore || 1;
+              // HanziLookup returns results sorted by score, but lower scores = better matches
+              // Sort by score ascending (lowest/best first)
+              validResults.sort((a, b) => a.score - b.score);
               
+              // Log top results after sorting to verify
+              console.log('Top 10 results after sorting:', validResults.slice(0, 10).map((r, i) => `${i+1}. ${r.character} (${r.score.toFixed(2)})`).join(', '));
+              
+              // Convert scores to confidence
+              // HanziLookupJS uses lower scores for better matches
               const bestResult = validResults[0];
-              // HanziLookup uses lower scores for better matches
-              // Convert to confidence: normalize score relative to range
-              // Better matches have lower scores, so we invert the relationship
-              // Use a more generous confidence calculation
-              const normalizedScore = scoreRange > 0 ? (bestResult.score - minScore) / scoreRange : 0;
-              const confidence = Math.max(0.1, Math.min(0.95, 1 - normalizedScore * 0.7));
+              const confidence = this.calculateConfidence(validResults, 0);
               
-              // Include more alternatives (up to 10)
+              // Get alternatives from top results (no manual boosting)
               const alternatives = validResults.slice(1, 11).map(r => r.character);
               
               console.log('Recognition result:', bestResult.character, 'confidence:', confidence, 'alternatives:', alternatives);
@@ -400,14 +466,30 @@ export class HandwritingRecognitionService {
     if (this.isReady()) {
       return new Observable<RecognitionResult[]>(observer => {
         try {
+          // Validate normalized strokes before passing to HanziLookup
+          if (!normalizedStrokes || normalizedStrokes.length === 0) {
+            console.error('No normalized strokes to analyze (draw-ahead)');
+            this.fallbackDrawAheadRecognition(normalizedStrokes, strokes.length, maxResults).subscribe(observer);
+            return;
+          }
+          
+          // Ensure all strokes are valid (non-empty arrays with at least 2 points)
+          const validStrokes = normalizedStrokes.filter(stroke => 
+            stroke && Array.isArray(stroke) && stroke.length >= 2
+          );
+          
+          if (validStrokes.length === 0) {
+            console.error('No valid strokes after validation (draw-ahead)');
+            this.fallbackDrawAheadRecognition(normalizedStrokes, strokes.length, maxResults).subscribe(observer);
+            return;
+          }
+          
           // Normalized strokes are in format [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
           // Create AnalyzedCharacter from strokes
-          const analyzedChar = new HanziLookup.AnalyzedCharacter(normalizedStrokes);
+          const analyzedChar = new HanziLookup.AnalyzedCharacter(validStrokes);
           
-          // Create Matcher with the dataset name
-          // For complete characters (3+ strokes), use slightly looser matching to catch characters like 大
-          // For partial characters, use default looseness
-          const looseness = normalizedStrokes.length >= 3 ? 0.16 : 0.15;
+          // Create Matcher with optimal looseness for draw-ahead (partial recognition)
+          const looseness = this.calculateLooseness(validStrokes.length, true);
           const matcher = new HanziLookup.Matcher('mmah', looseness);
           
           console.log('Calling HanziLookup.Matcher.match (draw-ahead) with strokes:', {
@@ -416,10 +498,9 @@ export class HandwritingRecognitionService {
             looseness: looseness
           });
 
-          // Call match with more results to ensure we get common characters like 大
-          // Request 300 results to have better chance of finding the character, especially when complete
-          // Complete characters sometimes rank lower than partial matches
-          matcher.match(analyzedChar, Math.max(maxResults, 300), (results: Array<{character: string, score: number}>) => {
+          // Call match with sufficient results for draw-ahead recognition
+          // Request more results to ensure we catch common characters
+          matcher.match(analyzedChar, Math.max(maxResults, 500), (results: Array<{character: string, score: number}>) => {
             console.log('HanziLookup.Matcher.match (draw-ahead) callback called with results:', results?.length || 0);
             // Log all results to help debug
             if (results && results.length > 0) {
@@ -429,20 +510,14 @@ export class HandwritingRecognitionService {
                   : 'invalid';
                 return `${r.character} (score: ${scoreStr})`;
               }).join(', '));
-              // Check if 大 is in results
-              const daIndex = results.findIndex(r => r.character === '大');
-              if (daIndex !== -1) {
-                console.log(`Character 大 found in results at index ${daIndex} with score ${results[daIndex].score}`);
-                // Log surrounding characters for context
-                const start = Math.max(0, daIndex - 2);
-                const end = Math.min(results.length, daIndex + 3);
-                console.log(`Characters around 大:`, results.slice(start, end).map(r => `${r.character}(${r.score.toFixed(2)})`).join(', '));
-              } else {
-                console.log(`Character 大 NOT found in top ${results.length} results`);
-                // Check if we should search deeper - log the last few results
-                if (results.length > 0) {
-                  console.log(`Last 5 results:`, results.slice(-5).map(r => `${r.character}(${r.score.toFixed(2)})`).join(', '));
-                }
+              // Debug logging for recognition results
+              if (results.length > 0) {
+                console.log(`Top 5 results:`, results.slice(0, 5).map(r => {
+                  const scoreStr = (r.score !== -Infinity && r.score !== Infinity && !isNaN(r.score) && isFinite(r.score)) 
+                    ? r.score.toFixed(2) 
+                    : 'invalid';
+                  return `${r.character}(${scoreStr})`;
+                }).join(', '));
               }
             }
             if (results && results.length > 0) {
@@ -460,52 +535,19 @@ export class HandwritingRecognitionService {
                 return;
               }
               
-              // For draw-ahead, return all valid results (up to maxResults) to catch characters like 大
-              // Special handling: if 大 is found but not in top results, boost it
-              let topResults = validResults.slice(0, maxResults);
+              // HanziLookup returns results sorted by score, but lower scores = better matches
+              // Sort by score ascending (lowest/best first)
+              validResults.sort((a, b) => a.score - b.score);
               
-              // Special boost for common character 大 when it's found but ranked low (e.g., position 200+)
-              if (normalizedStrokes.length >= 3) {
-                const daIndex = validResults.findIndex(r => r.character === '大');
-                if (daIndex !== -1 && daIndex >= maxResults) {
-                  // 大 is beyond our limit - add it to results with boosted confidence
-                  const daResult = validResults[daIndex];
-                  // Insert it in a visible position (around position 5-10)
-                  const insertPosition = Math.min(8, topResults.length);
-                  topResults.splice(insertPosition, 0, daResult);
-                  // Limit to maxResults
-                  topResults = topResults.slice(0, maxResults);
-                  console.log(`Boosted 大 from position ${daIndex} to position ${insertPosition} in results`);
-                }
-              }
+              // Log top results after sorting for debugging
+              console.log(`Top ${Math.min(10, maxResults)} results after sorting:`, validResults.slice(0, Math.min(10, maxResults)).map((r, i) => `${i+1}. ${r.character} (${r.score.toFixed(2)})`).join(', '));
               
-              // Convert scores to confidence (HanziLookupJS uses lower scores for better matches)
-              const maxScore = topResults[0].score;
-              const minScore = topResults[topResults.length - 1].score;
-              const scoreRange = maxScore - minScore || 1;
+              // For draw-ahead, return top valid results (no manual boosting)
+              const topResults = validResults.slice(0, maxResults);
               
-              // Convert each result to RecognitionResult
+              // Convert each result to RecognitionResult with proper confidence calculation
               const recognitionResults: RecognitionResult[] = topResults.map((result, index) => {
-                // Check if this is the boosted 大 character
-                const isBoostedDa = result.character === '大' && normalizedStrokes.length >= 3 && 
-                                   validResults.findIndex(r => r.character === '大') >= maxResults;
-                
-                // For draw-ahead, calculate confidence based on score
-                // HanziLookup: lower scores = better matches
-                // We need to convert score to confidence where lower score = higher confidence
-                const normalizedScore = scoreRange > 0 ? (result.score - minScore) / scoreRange : 0;
-                // Invert: lower normalized score (better match) = higher confidence
-                // Use a more generous calculation to give better confidence to good matches
-                let baseConfidence = Math.max(0.1, Math.min(0.95, 1 - normalizedScore * 0.5));
-                
-                // Special boost for 大 if it was ranked low
-                if (isBoostedDa) {
-                  baseConfidence = Math.max(0.75, baseConfidence); // Ensure at least 75% confidence
-                }
-                
-                // Small boost for top results to differentiate them
-                const boost = index < 10 ? 0.01 * (10 - index) : 0;
-                const confidence = Math.min(0.95, baseConfidence + boost);
+                const confidence = this.calculateConfidence(validResults, index);
                 return {
                   character: result.character,
                   confidence: confidence,
@@ -598,8 +640,9 @@ export class HandwritingRecognitionService {
 
   /**
    * Normalize stroke coordinates to a standard size with improved preprocessing
-   * HanziLookup expects coordinates in 0-256 range
+   * HanziLookup expects coordinates in 0-255 range (256x256 canvas)
    * Strokes are in format: [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
+   * Preserves aspect ratio and character proportions accurately
    */
   private normalizeStrokes(strokes: number[][][]): number[][][] {
     if (!strokes || strokes.length === 0) {
@@ -626,48 +669,208 @@ export class HandwritingRecognitionService {
     // Calculate bounding box dimensions
     const width = (maxX - minX) || 1;
     const height = (maxY - minY) || 1;
-    const maxDim = Math.max(width, height);
-    
-    // Use adaptive padding based on character size
-    // Smaller characters need more padding, larger ones need less
-    const basePadding = maxDim * 0.15;
-    const minPadding = 20; // Minimum padding for very small drawings
-    const padding = Math.max(basePadding, minPadding);
-    
-    const scale = maxDim + padding * 2;
-    
-    // Ensure minimum scale to avoid over-normalization
-    const minScale = 60;
-    const finalScale = Math.max(scale, minScale);
-    
-    // Center and normalize to 0-256 range (HanziLookup expects 256x256 canvas)
     const centerX = (minX + maxX) / 2;
     const centerY = (minY + maxY) / 2;
+    
+    // Target size for HanziLookup (256x256 canvas, coordinates 0-255)
     const targetSize = 256;
     
-    // Use adaptive effective size based on number of strokes
-    // More strokes = slightly larger effective area (characters spread out more)
-    const baseEffectiveSize = 200;
-    const strokeBonus = Math.min(strokes.length * 2, 20); // Up to 20px bonus for more strokes
-    const effectiveSize = baseEffectiveSize + strokeBonus;
-    const offset = (targetSize - effectiveSize) / 2;
+    // Improved normalization: consistent approach that matches database format
+    // Key: characters should fill 60-80% of available canvas for best matching
+    const maxDim = Math.max(width, height);
+    const aspectRatio = width / height;
     
-    return smoothedStrokes.map(stroke => {
-      return stroke.map(point => {
-        // Center the character and normalize to 0-256 range
-        const centeredX = point[0] - centerX + finalScale / 2;
-        const centeredY = point[1] - centerY + finalScale / 2;
-        // Map to effective size with margin, then add offset to center in 256x256
-        const normalizedX = Math.max(0, Math.min(effectiveSize, (centeredX / finalScale) * effectiveSize)) + offset;
-        const normalizedY = Math.max(0, Math.min(effectiveSize, (centeredY / finalScale) * effectiveSize)) + offset;
-        return [normalizedX, normalizedY];
+    // Use consistent padding that works well with database format
+    // Padding should be enough to avoid edge clipping but allow good use of space
+    const padding = 25;
+    const availableSize = targetSize - (padding * 2);
+    
+    // Calculate scale to fill target percentage of available space
+    // Target: 70% fill ratio for optimal matching with database
+    const targetFillRatio = 0.70;
+    const targetCharacterSize = availableSize * targetFillRatio;
+    
+    // Calculate scale needed to achieve target size
+    let scale = targetCharacterSize / maxDim;
+    
+    // Ensure minimum scale for very small characters
+    // But don't force too large - let natural scaling work
+    const minScale = 0.4;
+    const maxScale = 3.0; // Allow larger scale for very small input
+    const finalScale = Math.max(minScale, Math.min(maxScale, scale));
+    
+    // Validate final scale produces reasonable character size
+    const finalCharacterSize = maxDim * finalScale;
+    if (finalCharacterSize < availableSize * 0.5) {
+      // Character too small - increase scale
+      const adjustedScale = (availableSize * 0.5) / maxDim;
+      const normalized = this.normalizeStrokesWithScale(smoothedStrokes, centerX, centerY, Math.max(minScale, Math.min(maxScale, adjustedScale)), targetSize);
+      this.logNormalizationParameters(minX, minY, maxX, maxY, width, height, adjustedScale, padding, strokes.length, normalized);
+      return normalized;
+    }
+    
+    // Normalize strokes using the calculated scale
+    const normalized = this.normalizeStrokesWithScale(smoothedStrokes, centerX, centerY, finalScale, targetSize);
+    this.logNormalizationParameters(minX, minY, maxX, maxY, width, height, finalScale, padding, strokes.length, normalized);
+    return normalized;
+  }
+
+  /**
+   * Normalize strokes with a specific scale factor
+   * Helper method for consistent normalization
+   */
+  private normalizeStrokesWithScale(
+    strokes: number[][][], 
+    centerX: number, 
+    centerY: number, 
+    scale: number, 
+    targetSize: number
+  ): number[][][] {
+    // Normalize strokes preserving aspect ratio
+    // Filter out empty strokes and ensure all strokes have at least 2 points
+    const normalized: number[][][] = strokes
+      .filter(stroke => stroke && stroke.length >= 2) // Ensure strokes have at least 2 points
+      .map(stroke => {
+        return stroke
+          .filter(point => point && Array.isArray(point) && point.length >= 2) // Ensure points are valid
+          .map(point => {
+            // Translate to center
+            const translatedX = point[0] - centerX;
+            const translatedY = point[1] - centerY;
+            
+            // Scale uniformly to preserve aspect ratio
+            const scaledX = translatedX * scale;
+            const scaledY = translatedY * scale;
+            
+            // Center in targetSize x targetSize canvas
+            const normalizedX = Math.max(0, Math.min(targetSize - 1, scaledX + targetSize / 2));
+            const normalizedY = Math.max(0, Math.min(targetSize - 1, scaledY + targetSize / 2));
+            
+            return [normalizedX, normalizedY];
+          })
+          .filter(point => point.length === 2 && !isNaN(point[0]) && !isNaN(point[1]) && isFinite(point[0]) && isFinite(point[1])); // Final validation
+      })
+      .filter(stroke => stroke && stroke.length >= 2); // Final check: strokes must have at least 2 points
+    
+    // Validate normalized strokes are within bounds and valid
+    if (normalized.length === 0) {
+      console.warn('Normalization produced no valid strokes');
+      return strokes; // Return original if normalization fails
+    }
+    
+    this.validateNormalizedStrokes(normalized);
+    
+    return normalized;
+  }
+
+  /**
+   * Log normalization parameters for debugging
+   */
+  private logNormalizationParameters(
+    minX: number, minY: number, maxX: number, maxY: number,
+    width: number, height: number,
+    scale: number, padding: number,
+    strokeCount: number,
+    normalized: number[][][]
+  ): void {
+    // Debug logging for normalization parameters
+    if (console && console.log) {
+      console.log('Normalization parameters:', {
+        originalBounds: { minX, minY, maxX, maxY, width, height },
+        scale: scale.toFixed(3),
+        padding: padding.toFixed(1),
+        strokeCount: strokeCount,
+        normalizedBounds: this.getNormalizedBounds(normalized)
+      });
+    }
+  }
+
+  /**
+   * Validate that normalized strokes are within expected bounds
+   * Also validates stroke quality for matching accuracy
+   */
+  private validateNormalizedStrokes(strokes: number[][][]): void {
+    const targetSize = 256;
+    let hasOutOfBounds = false;
+    let hasInvalidPoints = false;
+    
+    strokes.forEach((stroke, strokeIdx) => {
+      if (!stroke || stroke.length < 2) {
+        if (!hasInvalidPoints) {
+          console.warn('Invalid stroke found:', { stroke: strokeIdx, length: stroke?.length });
+          hasInvalidPoints = true;
+        }
+        return;
+      }
+      
+      stroke.forEach((point, pointIdx) => {
+        const x = point[0];
+        const y = point[1];
+        
+        // Check bounds
+        if (x < 0 || x >= targetSize || y < 0 || y >= targetSize) {
+          if (!hasOutOfBounds) {
+            console.warn('Normalized stroke out of bounds:', {
+              stroke: strokeIdx,
+              point: pointIdx,
+              x, y,
+              bounds: `[0, ${targetSize - 1}]`
+            });
+            hasOutOfBounds = true;
+          }
+        }
+        
+        // Check for invalid values
+        if (isNaN(x) || isNaN(y) || !isFinite(x) || !isFinite(y)) {
+          if (!hasInvalidPoints) {
+            console.warn('Invalid point values:', {
+              stroke: strokeIdx,
+              point: pointIdx,
+              x, y
+            });
+            hasInvalidPoints = true;
+          }
+        }
       });
     });
+    
+    // Validate stroke distribution - characters should use reasonable portion of canvas
+    const bounds = this.getNormalizedBounds(strokes);
+    const usedWidth = bounds.maxX - bounds.minX;
+    const usedHeight = bounds.maxY - bounds.minY;
+    const minUsage = targetSize * 0.3; // At least 30% of canvas should be used
+    
+    if (usedWidth < minUsage && usedHeight < minUsage) {
+      console.warn('Normalized character uses too little of canvas:', {
+        usedWidth: usedWidth.toFixed(1),
+        usedHeight: usedHeight.toFixed(1),
+        minUsage: minUsage.toFixed(1)
+      });
+    }
+  }
+
+  /**
+   * Get bounding box of normalized strokes for debugging
+   */
+  private getNormalizedBounds(strokes: number[][][]): { minX: number, minY: number, maxX: number, maxY: number } {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    
+    strokes.forEach(stroke => {
+      stroke.forEach(point => {
+        minX = Math.min(minX, point[0]);
+        minY = Math.min(minY, point[1]);
+        maxX = Math.max(maxX, point[0]);
+        maxY = Math.max(maxY, point[1]);
+      });
+    });
+    
+    return { minX, minY, maxX, maxY };
   }
 
   /**
    * Smooth stroke to reduce noise from hand-drawn input
-   * Uses a simple moving average filter
+   * Uses adaptive smoothing based on stroke length and point density
+   * Preserves important stroke features (corners, endpoints)
    * Stroke format: [[x, y], [x, y], ...]
    */
   private smoothStroke(stroke: number[][]): number[][] {
@@ -675,22 +878,41 @@ export class HandwritingRecognitionService {
       return stroke; // Too short to smooth
     }
 
-    const smoothed: number[][] = [];
-    const windowSize = 3; // Number of points to average
+    // Adaptive window size based on stroke length
+    // Longer strokes can use larger windows, shorter strokes need smaller windows
+    const baseWindowSize = 2;
+    const adaptiveWindowSize = Math.min(
+      baseWindowSize + Math.floor(stroke.length / 20),
+      5 // Cap at 5 to avoid over-smoothing
+    );
     
-    for (let i = 0; i < stroke.length; i++) {
+    const smoothed: number[][] = [];
+    
+    // Always preserve first and last points (endpoints are important)
+    smoothed.push([stroke[0][0], stroke[0][1]]);
+    
+    // Smooth intermediate points
+    for (let i = 1; i < stroke.length - 1; i++) {
+      const windowSize = Math.min(adaptiveWindowSize, Math.min(i, stroke.length - 1 - i));
+      
       let sumX = 0, sumY = 0;
       let count = 0;
       
-      // Average points in a window around current point
+      // Weighted average: closer points have more influence
       for (let j = Math.max(0, i - windowSize); j <= Math.min(stroke.length - 1, i + windowSize); j++) {
-        sumX += stroke[j][0];
-        sumY += stroke[j][1];
-        count++;
+        const distance = Math.abs(j - i);
+        const weight = windowSize + 1 - distance; // Higher weight for closer points
+        
+        sumX += stroke[j][0] * weight;
+        sumY += stroke[j][1] * weight;
+        count += weight;
       }
       
       smoothed.push([sumX / count, sumY / count]);
     }
+    
+    // Always preserve last point
+    smoothed.push([stroke[stroke.length - 1][0], stroke[stroke.length - 1][1]]);
     
     return smoothed;
   }
@@ -876,6 +1098,62 @@ export class HandwritingRecognitionService {
     }
     
     return null;
+  }
+
+  /**
+   * Calculate confidence from HanziLookup score
+   * HanziLookup uses lower scores for better matches
+   * Handles edge cases like identical scores and very small ranges
+   */
+  private calculateConfidence(results: Array<{character: string, score: number}>, index: number): number {
+    if (results.length === 0) {
+      return 0;
+    }
+    
+    if (results.length === 1) {
+      // Single result - use moderate confidence
+      return 0.7;
+    }
+    
+    const bestScore = results[0].score;
+    const worstScore = results[results.length - 1].score;
+    const scoreRange = worstScore - bestScore;
+    
+    // Handle edge case: all scores are identical or very close
+    if (scoreRange < 0.001) {
+      // Scores are essentially identical - use position-based confidence
+      return Math.max(0.3, 0.9 - (index * 0.05));
+    }
+    
+    const currentScore = results[index].score;
+    
+    // Calculate how much better/worse this score is relative to the best
+    // Lower score = better match
+    const scoreDifference = currentScore - bestScore;
+    const normalizedDifference = scoreRange > 0 ? scoreDifference / scoreRange : 0;
+    
+    // Improved confidence calculation for better accuracy
+    // Top match gets very high confidence, others drop more sharply
+    let baseConfidence: number;
+    
+    if (index === 0) {
+      // Best match - very high confidence
+      baseConfidence = 0.95;
+    } else if (normalizedDifference < 0.1) {
+      // Very close to best match - high confidence
+      baseConfidence = 0.85 - (normalizedDifference * 2);
+    } else if (normalizedDifference < 0.3) {
+      // Reasonably close - moderate confidence
+      baseConfidence = 0.75 - (normalizedDifference * 0.5);
+    } else {
+      // Further from best - lower confidence
+      baseConfidence = Math.max(0.2, 0.6 - (normalizedDifference * 0.8));
+    }
+    
+    // Add small position-based boost for top 3 results
+    const positionBoost = index < 3 ? (3 - index) * 0.02 : 0;
+    
+    return Math.max(0.1, Math.min(0.95, baseConfidence + positionBoost));
   }
 
   /**
