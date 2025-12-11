@@ -22,7 +22,7 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
   character: string = '';
   dictionaryEntries: DictionaryEntry[] = [];
   isLoading = false;
-  writer: HanziWriterInstance | null = null;
+  writers: HanziWriterInstance[] = [];
   isAnimating = false;
   showCharacterText = true;  // Show black character by default
   frequencyData: FrequencyData | null = null;
@@ -74,15 +74,17 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   ngOnDestroy() {
-    if (this.writer) {
+    // Clean up all writers
+    this.writers.forEach(writer => {
       try {
-        if (typeof this.writer.cancel === 'function') {
-          this.writer.cancel();
+        if (writer && typeof writer.cancel === 'function') {
+          writer.cancel();
         }
       } catch (e) {
         // Ignore errors when destroying
       }
-    }
+    });
+    this.writers = [];
   }
 
   loadCharacterData() {
@@ -198,25 +200,27 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
       return;
     }
 
-    // Ensure we only process single characters
-    const charToWrite = this.character.length === 1 ? this.character : this.character[0];
+    // Get the displayed character string (may contain multiple characters)
+    const displayedChar = this.getDisplayedCharacter();
     
-    // Check if character is a valid Chinese character
-    if (!/[\u4e00-\u9fff]/.test(charToWrite)) {
+    // Extract all Chinese characters from the string
+    const characters = Array.from(displayedChar).filter(char => /[\u4e00-\u9fff]/.test(char));
+    
+    if (characters.length === 0) {
       return;
     }
 
-    // Clear previous writer
-    if (this.writer) {
+    // Clear previous writers
+    this.writers.forEach(writer => {
       try {
-        if (typeof this.writer.cancel === 'function') {
-          this.writer.cancel();
+        if (writer && typeof writer.cancel === 'function') {
+          writer.cancel();
         }
       } catch (e) {
         // Ignore errors when canceling
       }
-      this.writer = null;
-    }
+    });
+    this.writers = [];
 
     // Clear the container
     const container = this.writerTarget.nativeElement;
@@ -235,62 +239,89 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
       const characterElement = characterContainer?.querySelector('.main-character') as HTMLElement;
       
       // Calculate size based on character element or use defaults
-      let width = 400;
-      let height = 400;
+      let baseWidth = 400;
+      let baseHeight = 400;
       
       if (characterElement) {
         const rect = characterElement.getBoundingClientRect();
-        // Use the larger dimension and add some padding for proper alignment
-        const size = Math.max(rect.width, rect.height) * 1.1;
-        width = Math.max(size, 300);
-        height = Math.max(size, 300);
+        // For multiple characters, use the full width of the text element
+        // and calculate per-character width
+        if (characters.length > 1) {
+          baseWidth = rect.width;
+          baseHeight = Math.max(rect.height, 300);
+        } else {
+          // Single character: use the larger dimension
+          const size = Math.max(rect.width, rect.height) * 1.1;
+          baseWidth = Math.max(size, 300);
+          baseHeight = Math.max(size, 300);
+        }
       }
 
-      // Create HanziWriter instance as overlay
-      this.writer = HanziWriter.create(container, charToWrite, {
-        width: width,
-        height: height,
-        padding: 0,
-        strokeColor: '#667eea',
-        radicalColor: '#ff6b6b',
-        strokeAnimationSpeed: 2,
-        delayBetweenStrokes: 200,
-        showOutline: true,  // Show outline when animating
-        showCharacter: false,  // We use text character instead
-        charColor: 'transparent'  // Don't show hanzi-writer's character
+      // Calculate width per character
+      // For multiple characters, divide evenly; for single, use full width
+      const widthPerChar = characters.length > 1 ? baseWidth / characters.length : baseWidth;
+      const height = baseHeight;
+
+      // Create a writer for each character
+      characters.forEach((char, index) => {
+        // Create a container div for this character
+        const charContainer = document.createElement('div');
+        charContainer.className = 'character-writer-container';
+        charContainer.style.display = 'inline-block';
+        charContainer.style.position = 'relative';
+        charContainer.style.width = `${widthPerChar}px`;
+        charContainer.style.height = `${height}px`;
+        charContainer.style.verticalAlign = 'top';
+        container.appendChild(charContainer);
+
+        // Create HanziWriter instance for this character
+        const writer = HanziWriter.create(charContainer, char, {
+          width: widthPerChar,
+          height: height,
+          padding: 0,
+          strokeColor: '#667eea',
+          radicalColor: '#ff6b6b',
+          strokeAnimationSpeed: 2,
+          delayBetweenStrokes: 200,
+          showOutline: true,  // Show outline when animating
+          showCharacter: false,  // We use text character instead
+          charColor: 'transparent'  // Don't show hanzi-writer's character
+        });
+
+        // Initially hide the writer (show character text instead)
+        if (writer) {
+          if (typeof writer.hideCharacter === 'function') {
+            writer.hideCharacter();
+          }
+          if (typeof writer.hideOutline === 'function') {
+            writer.hideOutline();
+          }
+        }
+
+        this.writers.push(writer);
+
+        // Make the SVG background transparent and center it
+        setTimeout(() => {
+          const svg = charContainer.querySelector('svg');
+          if (svg) {
+            svg.style.backgroundColor = 'transparent';
+            svg.style.position = 'absolute';
+            svg.style.top = '50%';
+            svg.style.left = '50%';
+            svg.style.transform = 'translate(-50%, -50%)';
+            svg.style.pointerEvents = 'none';
+          }
+        }, 100);
       });
-
-      // Initially hide the writer (show character text instead)
-      if (this.writer) {
-        if (typeof this.writer.hideCharacter === 'function') {
-          this.writer.hideCharacter();
-        }
-        if (typeof this.writer.hideOutline === 'function') {
-          this.writer.hideOutline();
-        }
-      }
-
-      // Make the SVG background transparent and center it
-      setTimeout(() => {
-        const svg = container.querySelector('svg');
-        if (svg) {
-          svg.style.backgroundColor = 'transparent';
-          svg.style.position = 'absolute';
-          svg.style.top = '50%';
-          svg.style.left = '50%';
-          svg.style.transform = 'translate(-50%, -50%)';
-          svg.style.pointerEvents = 'none';
-        }
-      }, 100);
 
     } catch (error) {
       // Error initializing HanziWriter
-      this.writer = null;
+      this.writers = [];
     }
   }
 
   animateCharacter() {
-    if (!this.writer || this.isAnimating) {
+    if (this.writers.length === 0 || this.isAnimating) {
       return;
     }
 
@@ -298,23 +329,45 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
       // Hide the black character text
       this.showCharacterText = false;
       
-      // Show the outline if method exists
-      if (typeof this.writer.showOutline === 'function') {
-        this.writer.showOutline();
-      }
+      // Show outlines for all writers
+      this.writers.forEach(writer => {
+        if (writer && typeof writer.showOutline === 'function') {
+          writer.showOutline();
+        }
+      });
       
       this.isAnimating = true;
       
-      // Start animation if method exists
-      if (typeof this.writer.animateCharacter === 'function') {
-        this.writer.animateCharacter({
-          onComplete: () => {
+      // Animate all characters sequentially
+      // Start with the first character
+      let completedCount = 0;
+      const totalWriters = this.writers.length;
+      
+      this.writers.forEach((writer, index) => {
+        if (writer && typeof writer.animateCharacter === 'function') {
+          // Add a small delay between characters for sequential animation
+          setTimeout(() => {
+            writer.animateCharacter({
+              onComplete: () => {
+                completedCount++;
+                // When all characters are done animating
+                if (completedCount === totalWriters) {
+                  this.isAnimating = false;
+                }
+              }
+            });
+          }, index * 300); // 300ms delay between each character
+        } else {
+          completedCount++;
+          if (completedCount === totalWriters) {
             this.isAnimating = false;
           }
-        });
-      } else {
+        }
+      });
+      
+      // If no writers have animateCharacter method, reset state
+      if (this.writers.every(w => !w || typeof w.animateCharacter !== 'function')) {
         this.isAnimating = false;
-        // animateCharacter method not available
       }
     } catch (error) {
       // Error animating character
@@ -324,23 +377,27 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   resetCharacter() {
-    if (!this.writer) {
+    if (this.writers.length === 0) {
       return;
     }
     
     try {
-      // Cancel any ongoing animation if the method exists
-      if (typeof this.writer.cancel === 'function') {
-        this.writer.cancel();
-      }
-      
-      // Hide character and outline if methods exist
-      if (typeof this.writer.hideCharacter === 'function') {
-        this.writer.hideCharacter();
-      }
-      if (typeof this.writer.hideOutline === 'function') {
-        this.writer.hideOutline();
-      }
+      // Cancel any ongoing animations for all writers
+      this.writers.forEach(writer => {
+        if (writer) {
+          if (typeof writer.cancel === 'function') {
+            writer.cancel();
+          }
+          
+          // Hide character and outline if methods exist
+          if (typeof writer.hideCharacter === 'function') {
+            writer.hideCharacter();
+          }
+          if (typeof writer.hideOutline === 'function') {
+            writer.hideOutline();
+          }
+        }
+      });
     } catch (error) {
       // Error resetting character
     }
@@ -351,10 +408,13 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   quizCharacter() {
-    if (!this.writer) {
+    if (this.writers.length === 0) {
       return;
     }
-    this.writer.quiz();
+    // Quiz only the first character (hanzi-writer quiz mode typically works with single characters)
+    if (this.writers[0] && typeof this.writers[0].quiz === 'function') {
+      this.writers[0].quiz();
+    }
   }
 
   /**
@@ -380,16 +440,14 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
     if (this.dictionaryEntries.length > 0) {
       const entry = this.dictionaryEntries[0];
       const newChar = this.showSimplified ? entry.simplified : entry.traditional;
-      // For single characters, update the character and reinitialize writer
-      if (newChar.length === 1 && newChar !== this.character) {
+      // Update character if it changed (supports both single and multiple characters)
+      if (newChar !== this.character) {
         this.character = newChar;
-        // Reinitialize writer with new character
+        // Reinitialize writers with new character(s)
         setTimeout(() => {
           this.initializeWriter();
         }, 100);
       }
-      // For multi-character entries, we don't update the character variable
-      // but the display will still update via getDisplayedCharacter()
     }
   }
 
