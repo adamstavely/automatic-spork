@@ -1,0 +1,71 @@
+.annotated-text {
+  margin-top: 24px;
+}
+
+.annotation-content {
+  padding: 20px;
+  background: #f9f9f9;
+  border-radius: 8px;
+  line-height: 2;
+  min-height: 100px;
+}
+
+.chinese-word {
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+.chinese-word.has-entry {
+  background-color: #e3f2fd;
+}
+
+.chinese-word.has-entry:hover {
+  background-color: #bbdefb;
+}
+
+.chinese-word.no-entry {
+  color: #999;
+}
+
+.word-popup {
+  position: fixed;
+  background: white;
+  border: 2px solid #667eea;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  z-index: 10000;
+  min-width: 300px;
+  max-width: 400px;
+  padding: 16px;
+}
+
+.popup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.popup-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: #666;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  line-height: 1;
+}
+
+.popup-close:hover {
+  color: #333;
+}
+
+.popup-content {
+  max-height: 400px;
+  overflow-y: auto;
+}

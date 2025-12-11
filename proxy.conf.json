@@ -1,0 +1,12 @@
+{
+  "/api/mdbg": {
+    "target": "https://www.mdbg.net",
+    "secure": true,
+    "changeOrigin": true,
+    "pathRewrite": {
+      "^/api/mdbg": "/chinese/dictionary"
+    },
+    "logLevel": "debug"
+  }
+}
+

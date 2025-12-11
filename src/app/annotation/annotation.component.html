@@ -1,0 +1,89 @@
+<div class="card">
+  <h2>Text Annotation</h2>
+  <p style="color: #666; margin-bottom: 24px;">
+    Paste or type Chinese text to see word-by-word annotations. Click or hover on words to see full definitions.
+  </p>
+
+  <div style="margin-bottom: 24px;">
+    <label style="display: block; margin-bottom: 8px; font-weight: 500;">Annotation Mode:</label>
+    <select class="input" [(ngModel)]="annotationMode" (change)="annotateText()" style="max-width: 300px;">
+      <option value="chinese-only">Chinese only (details in popup)</option>
+      <option value="chinese-pinyin">Chinese + Pinyin (details in popup)</option>
+      <option value="chinese-pinyin-english">Chinese + Pinyin + English (inline)</option>
+    </select>
+  </div>
+
+  <div style="margin-bottom: 24px;">
+    <label style="display: block; margin-bottom: 8px; font-weight: 500;">Input Text:</label>
+    <textarea
+      class="input"
+      [(ngModel)]="inputText"
+      (input)="onTextInput()"
+      placeholder="Paste or type Chinese text here..."
+      rows="6"
+      style="width: 100%; font-family: 'PingFang SC', 'Microsoft YaHei', 'SimHei', 'STHeiti', sans-serif; font-size: 18px;">
+    </textarea>
+  </div>
+
+  <div style="margin-bottom: 24px;">
+    <button class="btn btn-primary" (click)="exportText()" [disabled]="annotatedWords.length === 0">
+      Export Annotated Text
+    </button>
+  </div>
+
+  <!-- Annotated text display -->
+  <div *ngIf="annotatedWords.length > 0" class="annotated-text">
+    <h3 style="margin-bottom: 16px;">Annotated Text:</h3>
+    <div class="annotation-content" [class]="getFontSizeClass()">
+      <span
+        *ngFor="let word of annotatedWords; let i = index"
+        [class.chinese-word]="word.isChinese"
+        [class.has-entry]="word.entry"
+        [class.no-entry]="word.isChinese && !word.entry"
+        (click)="onWordClick(word, $event)"
+        (mouseenter)="onWordHover(word, $event)"
+        (mouseleave)="closePopup()"
+        style="cursor: pointer; margin-right: 4px;">
+        <span *ngIf="word.text === '\n'"><br></span>
+        <span *ngIf="word.text !== '\n'">
+          <span>{{ getDisplayCharacter(word.entry) || word.text }}</span>
+          <span *ngIf="word.entry && annotationMode === 'chinese-pinyin'" style="color: #667eea; margin-left: 4px;">
+            ({{ word.entry.pinyin }})
+          </span>
+          <span *ngIf="word.entry && annotationMode === 'chinese-pinyin-english'" style="color: #667eea; margin-left: 4px;">
+            ({{ word.entry.pinyin }}) {{ word.entry.definitions[0] || '' }}
+          </span>
+        </span>
+      </span>
+    </div>
+  </div>
+
+  <!-- Popup for word details -->
+  <div
+    *ngIf="showPopup && selectedWord && selectedWord.entry"
+    class="word-popup"
+    [style.left.px]="popupPosition.x"
+    [style.top.px]="popupPosition.y"
+    (click)="$event.stopPropagation()">
+    <div class="popup-header">
+      <span [class]="getFontSizeClass()" style="font-size: 32px;">{{ getDisplayCharacter(selectedWord.entry) }}</span>
+      <button class="popup-close" (click)="closePopup()">×</button>
+    </div>
+    <div class="popup-content">
+      <div style="color: #667eea; font-weight: 500; margin-bottom: 8px;">
+        {{ selectedWord.entry.pinyin }}
+      </div>
+      <div>
+        <ul style="margin-left: 20px; color: #555;">
+          <li *ngFor="let def of selectedWord.entry.definitions">{{ def }}</li>
+        </ul>
+      </div>
+      <button
+        class="btn btn-primary"
+        (click)="navigateToCharacter(getDisplayCharacter(selectedWord.entry!))"
+        style="margin-top: 12px; padding: 8px 16px;">
+        View Details
+      </button>
+    </div>
+  </div>
+</div>

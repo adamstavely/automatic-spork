@@ -1,0 +1,121 @@
+<div class="card">
+  <h2>Help & Examples</h2>
+
+  <section style="margin-bottom: 32px;">
+    <h3 style="margin-bottom: 16px; color: #667eea;">Search Examples</h3>
+    
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Chinese Characters</h4>
+      <p style="color: #666; margin-bottom: 8px;">Search using Chinese characters:</p>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block;">你好</code>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block; margin-left: 8px;">中国</code>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Pinyin</h4>
+      <p style="color: #666; margin-bottom: 8px;">Search using Pinyin (with or without tone numbers):</p>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block;">ni3hao3</code>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block; margin-left: 8px;">nihao</code>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block; margin-left: 8px;">zhongguo</code>
+      <p style="color: #666; margin-top: 8px; font-size: 14px;">Note: Use <code>v</code> instead of <code>ü</code> (e.g., <code>nv</code> for 女)</p>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">English</h4>
+      <p style="color: #666; margin-bottom: 8px;">Search using English definitions:</p>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block;">hello</code>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block; margin-left: 8px;">restaurant</code>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block; margin-left: 8px;">China</code>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Wildcards</h4>
+      <p style="color: #666; margin-bottom: 8px;">Use <code>*</code> as a wildcard to match any characters:</p>
+      <ul style="margin-left: 20px; color: #666;">
+        <li><code>rest*</code> - matches words starting with "rest" (restaurant, restrain, etc.)</li>
+        <li><code>*文</code> - matches words ending with 文 (中文, 英文, etc.)</li>
+        <li><code>b*g</code> - matches words starting with "b" and ending with "g"</li>
+        <li><code>*中国*</code> - matches words containing 中国</li>
+      </ul>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Phrase Search</h4>
+      <p style="color: #666; margin-bottom: 8px;">Use quotes for exact phrase matching:</p>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block;">"to rest"</code>
+      <p style="color: #666; margin-top: 8px; font-size: 14px;">This will only match entries where "to" and "rest" appear together.</p>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Exclusion</h4>
+      <p style="color: #666; margin-bottom: 8px;">Use <code>-</code> to exclude terms:</p>
+      <code style="background: white; padding: 8px; border-radius: 4px; display: inline-block;">bill -gates</code>
+      <p style="color: #666; margin-top: 8px; font-size: 14px;">This will match entries with "bill" but exclude those with "gates".</p>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Search Type Prefixes</h4>
+      <p style="color: #666; margin-bottom: 8px;">Force search type with prefixes:</p>
+      <ul style="margin-left: 20px; color: #666;">
+        <li><code>c:你好</code> - search Chinese only</li>
+        <li><code>p:ni3hao3</code> - search Pinyin only</li>
+        <li><code>e:hello</code> - search English only</li>
+      </ul>
+    </div>
+  </section>
+
+  <section style="margin-bottom: 32px;">
+    <h3 style="margin-bottom: 16px; color: #667eea;">Features</h3>
+    
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Search</h4>
+      <p style="color: #666;">The main search page allows you to search the dictionary using Chinese characters, Pinyin, or English. Auto-complete suggestions appear as you type.</p>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Handwriting Recognition</h4>
+      <p style="color: #666;">Draw Chinese characters on the canvas to recognize them. The system is tolerant of stroke order mistakes.</p>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Text Annotation</h4>
+      <p style="color: #666;">Paste Chinese text and see word-by-word annotations. Three modes available: Chinese only, Chinese + Pinyin, or Chinese + Pinyin + English.</p>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Character Details</h4>
+      <p style="color: #666;">Click on any character to see detailed information including stroke order animation, dictionary entries, and related information.</p>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Radicals & Strokes</h4>
+      <p style="color: #666;">Browse Chinese radicals organized by stroke count. Click on a radical to find characters containing it.</p>
+    </div>
+  </section>
+
+  <section style="margin-bottom: 32px;">
+    <h3 style="margin-bottom: 16px; color: #667eea;">Settings</h3>
+    
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Font Size</h4>
+      <p style="color: #666;">Toggle between Small and Large font sizes for Chinese characters. Your preference is saved automatically.</p>
+    </div>
+
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px; margin-bottom: 16px;">
+      <h4 style="margin-bottom: 8px;">Simplified/Traditional</h4>
+      <p style="color: #666;">Switch between Simplified and Traditional Chinese character display. Your preference is saved automatically.</p>
+    </div>
+  </section>
+
+  <section>
+    <h3 style="margin-bottom: 16px; color: #667eea;">Keyboard Shortcuts</h3>
+    
+    <div style="background: #f9f9f9; padding: 16px; border-radius: 8px;">
+      <ul style="margin-left: 20px; color: #666;">
+        <li><strong>Enter</strong> - Submit search</li>
+        <li><strong>Escape</strong> - Close popups</li>
+        <li><strong>Arrow keys</strong> - Navigate suggestions (coming soon)</li>
+      </ul>
+    </div>
+  </section>
+</div>

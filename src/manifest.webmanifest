@@ -1,0 +1,17 @@
+{
+  "name": "Linguist App - Chinese Dictionary",
+  "short_name": "Linguist App",
+  "description": "Chinese Dictionary & Handwriting Recognition",
+  "theme_color": "#667eea",
+  "background_color": "#ffffff",
+  "display": "standalone",
+  "scope": "/",
+  "start_url": "/",
+  "icons": [
+    {
+      "src": "favicon.ico",
+      "sizes": "any",
+      "type": "image/x-icon"
+    }
+  ]
+}

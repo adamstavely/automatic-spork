@@ -1,0 +1,126 @@
+<div class="character-details-container">
+  <!-- Back Button -->
+  <button class="btn btn-secondary back-button" (click)="goBack()">
+    ← Back to Search
+  </button>
+
+  <div *ngIf="isLoading" class="loading-state">
+    <div>Loading character details...</div>
+  </div>
+
+  <div *ngIf="!isLoading && character" class="character-content">
+    <!-- Hero Card - Character, Stroke Order, and Information -->
+    <div class="hero-card">
+      <div class="hero-content">
+        <!-- Character Display with Animation -->
+        <div class="hero-character-section">
+          <div class="character-animation-container">
+            <div class="character-text-wrapper" *ngIf="showCharacterText">
+              <span [class]="getFontSizeClass()" class="main-character">{{ getDisplayedCharacter() }}</span>
+            </div>
+            <div #writerTarget class="writer-overlay" [class.visible]="!showCharacterText"></div>
+          </div>
+          <div class="stroke-controls">
+            <button class="btn btn-primary" (click)="animateCharacter()" [disabled]="isAnimating">
+              {{ isAnimating ? 'Animating...' : 'Animate' }}
+            </button>
+            <button class="btn btn-secondary" (click)="resetCharacter()">
+              Reset
+            </button>
+          </div>
+        </div>
+
+        <!-- Character Information -->
+        <div class="hero-info-section">
+          <h3 class="section-title">Information</h3>
+          <div *ngIf="dictionaryEntries.length > 0" class="info-content">
+            <div class="info-row">
+              <span class="info-label">Pinyin:</span>
+              <span class="info-value-text">{{ dictionaryEntries[0].pinyin }}</span>
+            </div>
+            <div *ngIf="frequencyData" class="info-row">
+              <span class="info-label">Frequency:</span>
+              <div class="info-value-group">
+                <span [class]="getFrequencyBadgeClass()" class="frequency-badge">
+                  {{ frequencyData.frequency }}
+                </span>
+                <span *ngIf="frequencyData.entryCount > 0" class="frequency-count">
+                  ({{ frequencyData.entryCount }} entries)
+                </span>
+              </div>
+            </div>
+            <div class="info-row">
+              <span class="info-label">{{ showSimplified ? 'Simplified' : 'Traditional' }}:</span>
+              <span [class]="getFontSizeClass()" class="info-value-text chinese-text">{{ getDisplayCharacter(dictionaryEntries[0]) }}</span>
+            </div>
+            <div *ngIf="dictionaryEntries[0].traditional !== dictionaryEntries[0].simplified" class="info-row">
+              <span class="info-label">{{ showSimplified ? 'Traditional' : 'Simplified' }}:</span>
+              <span [class]="getFontSizeClass()" class="info-value-text chinese-text">{{ showSimplified ? dictionaryEntries[0].traditional : dictionaryEntries[0].simplified }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dictionary Entries Card -->
+    <div *ngIf="dictionaryEntries.length > 0" class="content-card entries-card">
+      <h3 class="card-title">Dictionary Entries <span class="entry-count">({{ dictionaryEntries.length }})</span></h3>
+      <div class="entries-list">
+        <div *ngFor="let entry of dictionaryEntries" class="entry-item">
+          <div class="entry-header">
+            <span [class]="getFontSizeClass()" class="entry-character">{{ getDisplayCharacter(entry) }}</span>
+            <span *ngIf="entry.traditional !== entry.simplified" [class]="getFontSizeClass()" class="entry-variant">
+              ({{ showSimplified ? entry.traditional : entry.simplified }})
+            </span>
+          </div>
+          <div class="entry-pinyin">{{ entry.pinyin }}</div>
+          <ul class="entry-definitions">
+            <li *ngFor="let def of entry.definitions">{{ def }}</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div *ngIf="dictionaryEntries.length === 0" class="content-card empty-state">
+      <div class="empty-message">No dictionary entries found for "{{ character }}"</div>
+    </div>
+
+    <!-- Similar Characters Card -->
+    <div *ngIf="similarCharacters.length > 0" class="content-card similar-card">
+      <h3 class="card-title">Similar Characters</h3>
+      <div class="similar-grid">
+        <div
+          *ngFor="let similar of similarCharacters"
+          (click)="onCharacterClick(similar.character)"
+          class="similar-item">
+          <div class="similar-character">
+            <span [class]="getFontSizeClass()">{{ similar.character }}</span>
+          </div>
+          <div class="similar-reasons">
+            <span *ngFor="let reason of similar.reasons" class="reason-badge">{{ reason }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Related Words Card -->
+    <div *ngIf="relatedWords.length > 0" class="content-card related-card">
+      <h3 class="card-title">Related Words</h3>
+      <div class="related-grid">
+        <div
+          *ngFor="let related of relatedWords"
+          (click)="onCharacterClick(getDisplayCharacter(related.entry))"
+          class="related-item">
+          <div class="related-character">
+            <span [class]="getFontSizeClass()">{{ getDisplayCharacter(related.entry) }}</span>
+          </div>
+          <div class="related-pinyin">{{ related.entry.pinyin }}</div>
+          <div class="related-badge">
+            <span>{{ getRelationshipLabel(related.relationship) }}</span>
+          </div>
+          <div class="related-definition">{{ related.entry.definitions[0] }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
