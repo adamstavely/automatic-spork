@@ -122,5 +122,55 @@
         </div>
       </div>
     </div>
+
+    <!-- Character Decomposition Card -->
+    <div *ngIf="characterDecomposition && (characterDecomposition.components.length > 0 || characterDecomposition.radicals.length > 0)" class="content-card decomposition-card">
+      <h3 class="card-title">Character Decomposition</h3>
+      <div class="decomposition-content">
+        <!-- Structure Indicator -->
+        <div class="decomposition-structure">
+          <span class="structure-label">Structure:</span>
+          <span class="structure-value">{{ getStructureLabel(characterDecomposition.structure) }}</span>
+        </div>
+
+        <!-- Radicals -->
+        <div *ngIf="characterDecomposition.radicals.length > 0" class="radicals-section">
+          <h4 class="section-subtitle">Radicals</h4>
+          <div class="radicals-list">
+            <div
+              *ngFor="let radical of characterDecomposition.radicals"
+              class="radical-item"
+              (click)="onCharacterClick(radical.radical)">
+              <span [class]="getFontSizeClass()" class="radical-character">{{ radical.radical }}</span>
+              <div class="radical-info">
+                <div class="radical-id">Radical {{ radical.radicalId }}</div>
+                <div class="radical-meaning">{{ radical.meaning }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Components -->
+        <div *ngIf="characterDecomposition.components.length > 0" class="components-section">
+          <h4 class="section-subtitle">Components</h4>
+          <div class="components-grid">
+            <div
+              *ngFor="let component of characterDecomposition.components"
+              class="component-item"
+              (click)="onCharacterClick(component.component)"
+              [title]="component.meaning || ''">
+              <div class="component-character">
+                <span [class]="getFontSizeClass()">{{ component.component }}</span>
+              </div>
+              <div class="component-details">
+                <div class="component-position">{{ component.position }}</div>
+                <div *ngIf="component.meaning" class="component-meaning">{{ component.meaning }}</div>
+                <div class="component-frequency">Appears in {{ component.frequency }} character{{ component.frequency > 1 ? 's' : '' }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>

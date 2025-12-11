@@ -2,8 +2,8 @@ import { Component, ViewChild, ElementRef, AfterViewInit, OnInit } from '@angula
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
-import { catchError } from 'rxjs/operators';
-import { of } from 'rxjs';
+import { catchError, switchMap } from 'rxjs/operators';
+import { of, forkJoin, firstValueFrom } from 'rxjs';
 import { DictionaryService, DictionaryEntry } from '../dictionary.service';
 import { HandwritingRecognitionService } from '../handwriting-recognition.service';
 import { SettingsService } from '../settings.service';
@@ -11,6 +11,13 @@ import { SettingsService } from '../settings.service';
 interface Point {
   x: number;
   y: number;
+}
+
+interface DrawAheadMatch {
+  character: string;
+  pinyin: string;
+  definitions: string[];
+  confidence: number;
 }
 
 @Component({
@@ -28,13 +35,19 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
   private isDrawing = false;
   private currentPath: Point[] = [];
   private allPaths: Point[][] = [];
+  private drawAheadTimer: any = null;
   
   recognizedCharacter = '';
   dictionaryEntries: DictionaryEntry[] = [];
   isLoading = false;
   recognitionError: string | null = null;
   recognitionAlternatives: string[] = [];
+  recognitionConfidence: number | null = null;
   strokeTolerance = 0.1; // Tolerance for stroke order mistakes
+  
+  // Draw-ahead recognition
+  drawAheadMatches: DrawAheadMatch[] = [];
+  isRecognizingDrawAhead = false;
   
   fontSize: 'small' | 'large' = 'large';
   showSimplified = true;
@@ -94,6 +107,11 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
       this.isDrawing = false;
       this.allPaths.push([...this.currentPath]);
       this.currentPath = [];
+      
+      // Trigger draw-ahead recognition after stroke completion
+      if (this.allPaths.length > 0) {
+        this.scheduleDrawAheadRecognition();
+      }
     }
   }
 
@@ -130,6 +148,10 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
     };
   }
 
+  get strokeCount(): number {
+    return this.allPaths.length;
+  }
+
   clearCanvas() {
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.allPaths = [];
@@ -138,6 +160,86 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
     this.dictionaryEntries = [];
     this.recognitionError = null;
     this.recognitionAlternatives = [];
+    this.recognitionConfidence = null;
+    this.drawAheadMatches = [];
+    
+    // Clear any pending draw-ahead recognition
+    if (this.drawAheadTimer) {
+      clearTimeout(this.drawAheadTimer);
+      this.drawAheadTimer = null;
+    }
+  }
+
+  private scheduleDrawAheadRecognition() {
+    // Clear existing timer
+    if (this.drawAheadTimer) {
+      clearTimeout(this.drawAheadTimer);
+    }
+    
+    // Schedule recognition after 250ms debounce
+    this.drawAheadTimer = setTimeout(() => {
+      this.recognizeDrawAhead();
+    }, 250);
+  }
+
+  private async recognizeDrawAhead() {
+    if (this.isRecognizingDrawAhead || this.allPaths.length === 0) {
+      return;
+    }
+
+    this.isRecognizingDrawAhead = true;
+    
+    try {
+      // Convert paths to stroke format for recognition
+      // HanziLookup expects strokes as arrays of [x, y] pairs: [[x, y], [x, y], ...]
+      const strokes: number[][][] = this.allPaths.map(path => {
+        return path.map(point => [point.x, point.y] as [number, number]);
+      });
+      
+      // Get multiple recognition candidates (increased to 100 to catch characters like 大 that rank lower)
+      const results = await firstValueFrom(
+        this.recognitionService.recognizeDrawAhead(strokes, 100).pipe(
+          catchError(() => of([]))
+        )
+      );
+      
+      if (results && results.length > 0) {
+        // Look up dictionary entries for each character
+        const lookupPromises = results.map(result => {
+          if (!result.character) return null;
+          return firstValueFrom(
+            this.dictionaryService.lookupCharacter(result.character).pipe(
+              catchError(() => of([])),
+              switchMap(entries => {
+                if (entries && entries.length > 0) {
+                  const entry = entries[0];
+                  return of({
+                    character: result.character!,
+                    pinyin: entry.pinyin,
+                    definitions: entry.definitions,
+                    confidence: result.confidence
+                  } as DrawAheadMatch);
+                }
+                return of(null);
+              })
+            )
+          );
+        });
+        
+        const matches = await Promise.all(lookupPromises);
+        // Filter out null results and sort by confidence (highest first)
+        this.drawAheadMatches = matches
+          .filter((match): match is DrawAheadMatch => match !== null)
+          .sort((a, b) => b.confidence - a.confidence);
+      } else {
+        this.drawAheadMatches = [];
+      }
+    } catch (error) {
+      // Don't show errors for partial recognition - it's expected
+      this.drawAheadMatches = [];
+    } finally {
+      this.isRecognizingDrawAhead = false;
+    }
   }
 
   async recognizeCharacter() {
@@ -150,23 +252,26 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
     this.recognitionError = null;
     this.recognizedCharacter = '';
     this.dictionaryEntries = [];
+    this.recognitionConfidence = null;
     
     try {
       // Convert paths to stroke format for recognition
-      const strokes = this.allPaths.map(path => {
-        const stroke: number[] = [];
-        path.forEach(point => {
-          stroke.push(point.x, point.y);
-        });
-        return stroke;
+      // HanziLookup expects strokes as arrays of [x, y] pairs: [[x, y], [x, y], ...]
+      const strokes: number[][][] = this.allPaths.map(path => {
+        return path.map(point => [point.x, point.y] as [number, number]);
       });
       
       // Try to recognize the character from the canvas with stroke data
-      const result = await this.recognitionService.recognizeFromCanvas(this.canvas, strokes).pipe(
-        catchError(() => of({ character: null, confidence: 0, alternatives: [] }))
-      ).toPromise();
+      const result = await firstValueFrom(
+        this.recognitionService.recognizeFromCanvas(this.canvas, strokes).pipe(
+          catchError(() => of({ character: null, confidence: 0, alternatives: [] }))
+        )
+      );
       
       if (result) {
+        // Always store confidence score
+        this.recognitionConfidence = result.confidence;
+        
         // Store alternatives for user selection
         this.recognitionAlternatives = result.alternatives || [];
         
@@ -175,9 +280,9 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
           this.recognizedCharacter = result.character;
           await this.lookupCharacter(this.recognizedCharacter);
           
-          // If confidence is low, show alternatives
+          // If confidence is low, show message about alternatives
           if (result.confidence < 0.5 && this.recognitionAlternatives.length > 0) {
-            this.recognitionError = `Low confidence recognition (${Math.round(result.confidence * 100)}%). Try alternatives below if this is incorrect.`;
+            this.recognitionError = 'Low confidence recognition. Try alternatives below if this is incorrect.';
           } else {
             this.recognitionError = null;
           }
@@ -189,6 +294,7 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
           const browserResult = await this.recognitionService.recognizeWithBrowserAPI(this.canvas);
           if (browserResult && browserResult.character) {
             this.recognizedCharacter = browserResult.character;
+            this.recognitionConfidence = browserResult.confidence;
             this.recognitionAlternatives = browserResult.alternatives || [];
             await this.lookupCharacter(this.recognizedCharacter);
           } else {
@@ -196,18 +302,20 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
             const analysisResult = await this.recognitionService.recognizeWithImageAnalysis(this.canvas);
             if (analysisResult && analysisResult.character) {
               this.recognizedCharacter = analysisResult.character;
+              this.recognitionConfidence = analysisResult.confidence;
               this.recognitionAlternatives = analysisResult.alternatives || [];
               await this.lookupCharacter(this.recognizedCharacter);
             } else {
               // Recognition failed - show message to user
               this.recognitionError = 'Unable to recognize the character. Please try drawing more clearly, or enter the character manually below.';
+              this.recognitionConfidence = 0;
             }
           }
         }
       }
     } catch (error) {
-      console.error('Recognition error:', error);
       this.recognitionError = 'An error occurred during recognition. Please try again or enter the character manually.';
+      this.recognitionConfidence = 0;
     } finally {
       this.isLoading = false;
     }
@@ -216,10 +324,9 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
   async lookupCharacter(character: string) {
     this.isLoading = true;
     try {
-      const entries = await this.dictionaryService.lookupCharacter(character).toPromise();
+      const entries = await firstValueFrom(this.dictionaryService.lookupCharacter(character));
       this.dictionaryEntries = entries || [];
     } catch (error) {
-      console.error('Lookup error:', error);
       this.dictionaryEntries = [];
     } finally {
       this.isLoading = false;
@@ -231,22 +338,30 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
       this.recognizedCharacter = character;
       this.recognitionError = null;
       this.recognitionAlternatives = [];
+      this.recognitionConfidence = null; // Manual input has no confidence score
       this.lookupCharacter(character);
     } else {
       this.recognizedCharacter = '';
       this.dictionaryEntries = [];
       this.recognitionAlternatives = [];
+      this.recognitionConfidence = null;
     }
   }
 
   selectAlternative(character: string) {
     this.recognizedCharacter = character;
     this.recognitionError = null;
+    // Keep existing confidence when selecting alternative
     this.lookupCharacter(character);
   }
 
   onCharacterClick(character: string) {
     this.router.navigate(['/character', character]);
+  }
+
+  onDrawAheadMatchClick(match: DrawAheadMatch) {
+    // Navigate to character details page
+    this.router.navigate(['/character', match.character]);
   }
 
   getDisplayCharacter(entry: DictionaryEntry): string {
@@ -256,5 +371,38 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
   getFontSizeClass(): string {
     return this.fontSize === 'small' ? 'chinese-font-small' : 'chinese-font-large';
   }
-}
 
+  getConfidenceColor(): string {
+    if (this.recognitionConfidence === null) {
+      return '#666';
+    }
+    if (this.recognitionConfidence >= 0.7) {
+      return '#28a745'; // Green for high confidence
+    } else if (this.recognitionConfidence >= 0.4) {
+      return '#ffc107'; // Yellow for medium confidence
+    } else {
+      return '#dc3545'; // Red for low confidence
+    }
+  }
+
+  getConfidenceText(): string {
+    if (this.recognitionConfidence === null) {
+      return '';
+    }
+    return `${Math.round(this.recognitionConfidence * 100)}%`;
+  }
+
+  getConfidenceColorForValue(confidence: number): string {
+    if (confidence >= 0.7) {
+      return '#28a745'; // Green for high confidence
+    } else if (confidence >= 0.4) {
+      return '#ffc107'; // Yellow for medium confidence
+    } else {
+      return '#dc3545'; // Red for low confidence
+    }
+  }
+
+  getConfidencePercentage(confidence: number): number {
+    return Math.round(confidence * 100);
+  }
+}

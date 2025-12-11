@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
 import { Observable, of } from 'rxjs';
-import { map } from 'rxjs/operators';
+import { map, switchMap } from 'rxjs/operators';
 import { DictionaryService, DictionaryEntry } from './dictionary.service';
 
 export interface SearchOptions {
@@ -9,6 +9,11 @@ export interface SearchOptions {
   matchStart?: boolean;
   matchEnd?: boolean;
   excludeTerms?: string[];
+  strokeCountMin?: number;
+  strokeCountMax?: number;
+  radicalId?: number;
+  frequencyLevel?: 'common' | 'uncommon' | 'rare';
+  hskLevel?: number;
 }
 
 export interface SearchQuery {
@@ -131,22 +136,40 @@ export class SearchService {
   search(query: string, options?: SearchOptions): Observable<DictionaryEntry[]> {
     const parsed = this.parseQuery(query);
     
+    let searchResult$: Observable<DictionaryEntry[]>;
+    
     switch (parsed.type) {
       case 'chinese':
-        return this.searchChinese(parsed.query, options);
+        searchResult$ = this.searchChinese(parsed.query, options);
+        break;
       case 'pinyin':
-        return this.searchPinyin(parsed.query, options);
+        searchResult$ = this.searchPinyin(parsed.query, options);
+        break;
       case 'english':
-        return this.searchEnglish(parsed.query, options);
+        searchResult$ = this.searchEnglish(parsed.query, options);
+        break;
       case 'wildcard':
-        return this.searchWildcard(parsed.query, options);
+        searchResult$ = this.searchWildcard(parsed.query, options);
+        break;
       case 'phrase':
-        return this.searchPhrase(parsed.query, options);
+        searchResult$ = this.searchPhrase(parsed.query, options);
+        break;
       case 'exclusion':
-        return this.searchWithExclusion(parsed.query, parsed.excludeTerms || [], options);
+        searchResult$ = this.searchWithExclusion(parsed.query, parsed.excludeTerms || [], options);
+        break;
       default:
-        return of([]);
+        searchResult$ = of([]);
     }
+    
+    // Apply filters if any are specified
+    if (options && (options.strokeCountMin !== undefined || options.strokeCountMax !== undefined ||
+        options.radicalId !== undefined || options.frequencyLevel || options.hskLevel !== undefined)) {
+      return searchResult$.pipe(
+        switchMap(results => this.dictionaryService.applyFilters(results, options))
+      );
+    }
+    
+    return searchResult$;
   }
 
   /**

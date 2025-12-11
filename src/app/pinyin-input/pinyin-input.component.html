@@ -1,0 +1,35 @@
+<div class="pinyin-input-container">
+  <input
+    type="text"
+    class="pinyin-input"
+    [(ngModel)]="pinyinInput"
+    (input)="onPinyinInput($any($event.target).value)"
+    (focus)="onFocus()"
+    (blur)="onBlur()"
+    [placeholder]="placeholder"
+    autocomplete="off">
+  
+  <!-- Character Suggestions -->
+  <div *ngIf="showCharacterSuggestions && characterSuggestions.length > 0" class="suggestions-dropdown">
+    <div class="suggestions-header">Characters:</div>
+    <div
+      *ngFor="let char of characterSuggestions"
+      class="suggestion-item character-suggestion"
+      (click)="selectCharacter(char)"
+      (mousedown)="$event.preventDefault()">
+      <span class="chinese-font-large">{{ char }}</span>
+    </div>
+  </div>
+
+  <!-- Pinyin Suggestions -->
+  <div *ngIf="showPinyinSuggestions && pinyinSuggestions.length > 0 && showSuggestions" class="suggestions-dropdown pinyin-suggestions">
+    <div class="suggestions-header">Pinyin:</div>
+    <div
+      *ngFor="let pinyin of pinyinSuggestions"
+      class="suggestion-item"
+      (click)="selectPinyinSuggestion(pinyin)"
+      (mousedown)="$event.preventDefault()">
+      {{ pinyin }}
+    </div>
+  </div>
+</div>

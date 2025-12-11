@@ -46,7 +46,7 @@ export class SearchHistoryService {
       localStorage.setItem(this.STORAGE_KEY, JSON.stringify(history));
       this.historySubject.next(history);
     } catch (error) {
-      console.error('Error saving search history:', error);
+      // Error saving search history
     }
   }
 

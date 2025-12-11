@@ -1,12 +1,13 @@
 import { Component, OnInit, OnDestroy, ViewChild, ElementRef, AfterViewInit, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
-import { DictionaryService, DictionaryEntry, FrequencyData, RelatedWord } from '../dictionary.service';
+import { DictionaryService, DictionaryEntry, FrequencyData, RelatedWord, CharacterDecomposition } from '../dictionary.service';
 import { SettingsService } from '../settings.service';
+import { HanziWriterInstance, HanziWriterStatic } from '../types/hanzi-writer.types';
 // Import hanzi-writer - handle module format differences
 import * as HanziWriterModule from 'hanzi-writer';
 // Handle both ESM and CommonJS module formats
-const HanziWriter: any = (HanziWriterModule as any).default || HanziWriterModule;
+const HanziWriter = ((HanziWriterModule as any).default || HanziWriterModule) as HanziWriterStatic;
 
 @Component({
   selector: 'app-character-details',
@@ -21,12 +22,13 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
   character: string = '';
   dictionaryEntries: DictionaryEntry[] = [];
   isLoading = false;
-  writer: any = null;
+  writer: HanziWriterInstance | null = null;
   isAnimating = false;
   showCharacterText = true;  // Show black character by default
   frequencyData: FrequencyData | null = null;
   relatedWords: RelatedWord[] = [];
   similarCharacters: Array<{ character: string; score: number; reasons: string[] }> = [];
+  characterDecomposition: CharacterDecomposition | null = null;
   
   fontSize: 'small' | 'large' = 'large';
   showSimplified = true;
@@ -95,14 +97,15 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
         this.loadRelatedWords();
         // Load similar characters
         this.loadSimilarCharacters();
+        // Load character decomposition
+        this.loadCharacterDecomposition();
         // Reinitialize writer with new character
         this.cdr.detectChanges();
         setTimeout(() => {
           this.initializeWriter();
         }, 200);
       },
-      error: (error) => {
-        console.error('Error loading character:', error);
+      error: () => {
         this.isLoading = false;
       }
     });
@@ -114,8 +117,8 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
         next: (frequency) => {
           this.frequencyData = frequency;
         },
-        error: (error) => {
-          console.error('Error loading frequency data:', error);
+        error: () => {
+          // Error handled silently
         }
       });
     }
@@ -127,8 +130,8 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
         next: (related) => {
           this.relatedWords = related;
         },
-        error: (error) => {
-          console.error('Error loading related words:', error);
+        error: () => {
+          // Error handled silently
         }
       });
     }
@@ -140,8 +143,21 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
         next: (similar) => {
           this.similarCharacters = similar;
         },
-        error: (error) => {
-          console.error('Error loading similar characters:', error);
+        error: () => {
+          // Error handled silently
+        }
+      });
+    }
+  }
+
+  loadCharacterDecomposition() {
+    if (this.character && this.character.length === 1) {
+      this.dictionaryService.decomposeCharacter(this.character).subscribe({
+        next: (decomposition) => {
+          this.characterDecomposition = decomposition;
+        },
+        error: () => {
+          // Error handled silently
         }
       });
     }
@@ -175,12 +191,10 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
   initializeWriter() {
     // Check prerequisites
     if (!this.character || this.character.length === 0) {
-      console.warn('Cannot initialize writer: character is empty');
       return;
     }
 
     if (!this.writerTarget || !this.writerTarget.nativeElement) {
-      console.warn('Cannot initialize writer: writerTarget is not available');
       return;
     }
 
@@ -189,7 +203,6 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
     
     // Check if character is a valid Chinese character
     if (!/[\u4e00-\u9fff]/.test(charToWrite)) {
-      console.warn('Cannot initialize writer: not a valid Chinese character:', charToWrite);
       return;
     }
 
@@ -214,7 +227,6 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
     try {
       // Verify HanziWriter is available
       if (!HanziWriter || !HanziWriter.create) {
-        console.error('HanziWriter is not available');
         return;
       }
 
@@ -271,9 +283,8 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
         }
       }, 100);
 
-      console.log('HanziWriter initialized successfully for character:', charToWrite);
     } catch (error) {
-      console.error('Error initializing HanziWriter:', error);
+      // Error initializing HanziWriter
       this.writer = null;
     }
   }
@@ -303,10 +314,10 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
         });
       } else {
         this.isAnimating = false;
-        console.warn('animateCharacter method not available');
+        // animateCharacter method not available
       }
     } catch (error) {
-      console.error('Error animating character:', error);
+      // Error animating character
       this.isAnimating = false;
       this.showCharacterText = true; // Restore character text on error
     }
@@ -331,7 +342,7 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
         this.writer.hideOutline();
       }
     } catch (error) {
-      console.warn('Error resetting character:', error);
+      // Error resetting character
     }
     
     // Show the black character text again
@@ -392,5 +403,17 @@ export class CharacterDetailsComponent implements OnInit, AfterViewInit, OnDestr
 
   onCharacterClick(character: string) {
     this.router.navigate(['/character', character]);
+  }
+
+  getStructureLabel(structure: string): string {
+    const labels: { [key: string]: string } = {
+      'left-right': 'Left-Right',
+      'top-bottom': 'Top-Bottom',
+      'enclosure': 'Enclosure',
+      'complex': 'Complex',
+      'component-based': 'Component-Based',
+      'standalone': 'Standalone'
+    };
+    return labels[structure] || structure;
   }
 }

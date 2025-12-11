@@ -22,6 +22,11 @@
         </canvas>
       </div>
 
+      <div style="text-align: center; margin-bottom: 12px; color: #666;">
+        <div style="font-weight: 500; margin-bottom: 4px;">Strokes: {{ strokeCount }}</div>
+        <div style="font-size: 12px; color: #999;">Please pay attention to the stroke order</div>
+      </div>
+
       <div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
         <button class="btn btn-primary" (click)="recognizeCharacter()" [disabled]="isLoading">
           {{ isLoading ? 'Recognizing...' : 'Recognize Character' }}
@@ -44,14 +49,47 @@
     </div>
 
     <div style="flex: 1; min-width: 300px;">
-      <div *ngIf="recognizedCharacter" style="margin-bottom: 24px;">
-        <h3 style="margin-bottom: 12px;">Recognized Character</h3>
-        <div class="chinese-font" style="text-align: center; padding: 20px; background: #f9f9f9; border-radius: 8px;">
-          {{ recognizedCharacter }}
+      <!-- Draw-ahead matches -->
+      <div *ngIf="drawAheadMatches.length > 0" style="margin-bottom: 24px;">
+        <h3 style="margin-bottom: 12px;">Potential Matches</h3>
+        <div class="draw-ahead-matches" style="max-height: 500px; overflow-y: auto;">
+          <div 
+            *ngFor="let match of drawAheadMatches" 
+            class="draw-ahead-match"
+            (click)="onDrawAheadMatchClick(match)"
+            style="padding: 12px; margin-bottom: 8px; background: #f9f9f9; border-radius: 8px; cursor: pointer; border: 1px solid #e0e0e0; transition: background 0.2s;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <span [class]="getFontSizeClass()" style="font-size: 32px; font-weight: 500; cursor: pointer;">{{ match.character }}</span>
+              <div style="flex: 1;">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                  <span style="color: #667eea; font-weight: 500;">{{ match.pinyin }}</span>
+                  <span *ngIf="match.confidence" [style.color]="getConfidenceColorForValue(match.confidence)" style="font-size: 12px; font-weight: 500;">
+                    {{ getConfidencePercentage(match.confidence) }}%
+                  </span>
+                </div>
+                <div style="color: #555; font-size: 14px; line-height: 1.4;">
+                  {{ match.definitions[0] || 'No definition available' }}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div *ngIf="dictionaryEntries.length > 0">
+      <!-- Final recognized character (when manually recognized) -->
+      <div *ngIf="recognizedCharacter && !drawAheadMatches.length" style="margin-bottom: 24px;">
+        <h3 style="margin-bottom: 12px;">Recognized Character</h3>
+        <div class="chinese-font" style="text-align: center; padding: 20px; background: #f9f9f9; border-radius: 8px;">
+          <div style="font-size: 48px; margin-bottom: 8px;">{{ recognizedCharacter }}</div>
+          <div *ngIf="recognitionConfidence !== null" style="font-size: 14px; font-weight: 500; margin-top: 8px;">
+            <span style="color: #666;">Confidence: </span>
+            <span [style.color]="getConfidenceColor()">{{ getConfidenceText() }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dictionary entries for final recognition -->
+      <div *ngIf="dictionaryEntries.length > 0 && !drawAheadMatches.length">
         <h3 style="margin-bottom: 12px;">Dictionary Results</h3>
         <div *ngFor="let entry of dictionaryEntries" style="margin-bottom: 16px; padding: 16px; background: #f9f9f9; border-radius: 8px;">
           <div style="margin-bottom: 8px; cursor: pointer;" (click)="onCharacterClick(getDisplayCharacter(entry))">
@@ -71,12 +109,12 @@
         </div>
       </div>
 
-      <div *ngIf="isLoading && !recognizedCharacter && !recognitionError" style="text-align: center; padding: 40px; color: #666;">
+      <div *ngIf="isLoading && !recognizedCharacter && !recognitionError && drawAheadMatches.length === 0" style="text-align: center; padding: 40px; color: #666;">
         <div style="margin-bottom: 12px;">Analyzing character...</div>
         <div style="font-size: 14px; color: #999;">This may take a few seconds</div>
       </div>
 
-      <div *ngIf="recognitionAlternatives.length > 0" style="margin-top: 24px;">
+      <div *ngIf="recognitionAlternatives.length > 0 && !drawAheadMatches.length" style="margin-top: 24px;">
         <h4 style="margin-bottom: 12px;">Alternative Suggestions:</h4>
         <div style="display: flex; flex-wrap: wrap; gap: 8px;">
           <button
@@ -89,10 +127,9 @@
         </div>
       </div>
 
-      <div *ngIf="recognitionError" style="margin-top: 24px; padding: 16px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404;">
+      <div *ngIf="recognitionError && !drawAheadMatches.length" style="margin-top: 24px; padding: 16px; background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; color: #856404;">
         <strong>Recognition Result:</strong> {{ recognitionError }}
       </div>
     </div>
   </div>
 </div>
-

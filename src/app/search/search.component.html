@@ -80,9 +80,23 @@
       </div>
     </div>
 
+    <!-- Pinyin Character Suggestions -->
+    <div
+      *ngIf="showPinyinSuggestions && pinyinCharacterSuggestions.length > 0"
+      class="suggestions-dropdown pinyin-suggestions">
+      <div class="suggestions-header">Characters from Pinyin:</div>
+      <div
+        *ngFor="let char of pinyinCharacterSuggestions"
+        class="suggestion-item character-suggestion"
+        (click)="selectPinyinCharacter(char)"
+        (mousedown)="$event.preventDefault()">
+        <span [class]="getFontSizeClass()" style="font-size: 24px;">{{ char }}</span>
+      </div>
+    </div>
+
     <!-- Auto-complete suggestions -->
     <div
-      *ngIf="showSuggestions && suggestions.length > 0"
+      *ngIf="showSuggestions && suggestions.length > 0 && !showPinyinSuggestions"
       class="suggestions-dropdown">
       <div
         *ngFor="let suggestion of suggestions"
@@ -103,36 +117,120 @@
     </div>
 
     <!-- Advanced filters -->
-    <div *ngIf="showAdvancedFilters" class="advanced-filters" style="margin-top: 16px; padding: 16px; background: #f9f9f9; border-radius: 8px;">
-      <div style="margin-bottom: 12px;">
-        <label style="display: block; margin-bottom: 8px; font-weight: 500;">Search Type:</label>
-        <select class="input" [(ngModel)]="searchType" style="max-width: 200px;">
-          <option value="auto">Auto-detect</option>
-          <option value="chinese">Chinese only</option>
-          <option value="pinyin">Pinyin only</option>
-          <option value="english">English only</option>
-        </select>
+    <div *ngIf="showAdvancedFilters" class="advanced-filters">
+      <!-- Active filters display -->
+      <div *ngIf="hasActiveFilters()" class="active-filters">
+        <div class="active-filters-header">
+          <span class="active-filters-label">Active Filters:</span>
+          <button class="btn-clear-filters" (click)="clearFilters()">Clear All</button>
+        </div>
+        <div class="filter-badges">
+          <span *ngIf="strokeCountMin !== null || strokeCountMax !== null" class="filter-badge">
+            Strokes: {{ strokeCountMin !== null ? strokeCountMin : 'any' }}-{{ strokeCountMax !== null ? strokeCountMax : 'any' }}
+            <button class="badge-remove" (click)="strokeCountMin = null; strokeCountMax = null; performSearch()">×</button>
+          </span>
+          <span *ngIf="selectedRadicalId !== null" class="filter-badge">
+            Radical: {{ getRadicalDisplay(selectedRadicalId) }}
+            <button class="badge-remove" (click)="selectedRadicalId = null; performSearch()">×</button>
+          </span>
+          <span *ngIf="frequencyLevel !== null" class="filter-badge">
+            Frequency: {{ frequencyLevel }}
+            <button class="badge-remove" (click)="frequencyLevel = null; performSearch()">×</button>
+          </span>
+          <span *ngIf="hskLevel !== null" class="filter-badge">
+            HSK: {{ hskLevel }}
+            <button class="badge-remove" (click)="hskLevel = null; performSearch()">×</button>
+          </span>
+        </div>
       </div>
 
-      <div style="margin-bottom: 12px;">
-        <label style="display: flex; align-items: center; gap: 8px;">
-          <input type="checkbox" [(ngModel)]="matchWholeWord">
-          Match whole word only
-        </label>
-      </div>
+      <div class="filters-grid">
+        <div class="filter-group">
+          <label class="filter-label">Search Type:</label>
+          <select class="filter-input" [(ngModel)]="searchType">
+            <option value="auto">Auto-detect</option>
+            <option value="chinese">Chinese only</option>
+            <option value="pinyin">Pinyin only</option>
+            <option value="english">English only</option>
+          </select>
+        </div>
 
-      <div style="margin-bottom: 12px;">
-        <label style="display: flex; align-items: center; gap: 8px;">
-          <input type="checkbox" [(ngModel)]="matchStart">
-          Match at start of word
-        </label>
-      </div>
+        <div class="filter-group">
+          <label class="filter-label">Stroke Count:</label>
+          <div class="stroke-range">
+            <input 
+              type="number" 
+              class="filter-input" 
+              [(ngModel)]="strokeCountMin" 
+              placeholder="Min"
+              min="1"
+              max="30"
+              style="width: 80px;">
+            <span>to</span>
+            <input 
+              type="number" 
+              class="filter-input" 
+              [(ngModel)]="strokeCountMax" 
+              placeholder="Max"
+              min="1"
+              max="30"
+              style="width: 80px;">
+          </div>
+        </div>
 
-      <div>
-        <label style="display: flex; align-items: center; gap: 8px;">
-          <input type="checkbox" [(ngModel)]="matchEnd">
-          Match at end of word
-        </label>
+        <div class="filter-group">
+          <label class="filter-label">Radical:</label>
+          <select class="filter-input" [(ngModel)]="selectedRadicalId">
+            <option [value]="null">Any radical</option>
+            <option *ngFor="let radical of availableRadicals" [value]="radical.id">
+              {{ radical.character }} ({{ radical.strokes }} strokes)
+            </option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label">Frequency:</label>
+          <select class="filter-input" [(ngModel)]="frequencyLevel">
+            <option [value]="null">Any frequency</option>
+            <option value="common">Common</option>
+            <option value="uncommon">Uncommon</option>
+            <option value="rare">Rare</option>
+          </select>
+        </div>
+
+        <div class="filter-group">
+          <label class="filter-label">HSK Level:</label>
+          <select class="filter-input" [(ngModel)]="hskLevel">
+            <option [value]="null">Any level</option>
+            <option [value]="1">HSK 1</option>
+            <option [value]="2">HSK 2</option>
+            <option [value]="3">HSK 3</option>
+            <option [value]="4">HSK 4</option>
+            <option [value]="5">HSK 5</option>
+            <option [value]="6">HSK 6</option>
+          </select>
+        </div>
+
+        <div class="filter-group checkbox-group">
+          <label class="checkbox-label">
+            <input type="checkbox" [(ngModel)]="matchWholeWord">
+            Match whole word only
+          </label>
+        </div>
+
+        <div class="filter-group checkbox-group">
+          <label class="checkbox-label">
+            <input type="checkbox" [(ngModel)]="matchStart">
+            Match at start of word
+          </label>
+        </div>
+
+        <div class="filter-group checkbox-group">
+          <label class="checkbox-label">
+            <input type="checkbox" [(ngModel)]="matchEnd">
+            Match at end of word
+          </label>
+        </div>
       </div>
     </div>
   </div>

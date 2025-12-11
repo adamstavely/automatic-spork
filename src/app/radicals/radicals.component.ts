@@ -327,7 +327,7 @@ export class RadicalsComponent implements OnInit {
       const characters = await this.dictionaryService.getRadicalCharacters(radicalId).toPromise();
       this.radicalCharacters = characters || [];
     } catch (error) {
-      console.error('Error loading radical characters:', error);
+      // Error loading radical characters
       this.radicalCharacters = [];
     } finally {
       this.isLoading = false;

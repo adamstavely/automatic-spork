@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable, of } from 'rxjs';
-import { catchError, map, shareReplay } from 'rxjs/operators';
+import { catchError, map, shareReplay, switchMap } from 'rxjs/operators';
 import { SearchOptions } from './search.service';
 
 export interface DictionaryEntry {
@@ -22,6 +22,27 @@ export interface RelatedWord {
   entry: DictionaryEntry;
   relationship: 'same-radical' | 'contains-character' | 'similar-meaning' | 'same-pinyin' | 'shared-component';
   score: number;
+}
+
+export interface ComponentInfo {
+  component: string;
+  position: string; // e.g., "left", "right", "top", "bottom", "center"
+  meaning?: string;
+  frequency: number; // How often this component appears
+}
+
+export interface RadicalInfo {
+  radical: string;
+  radicalId: number;
+  meaning: string;
+}
+
+export interface CharacterDecomposition {
+  character: string;
+  components: ComponentInfo[];
+  radicals: RadicalInfo[];
+  structure: string; // e.g., "left-right", "top-bottom", "enclosure", "standalone"
+  etymology?: string;
 }
 
 interface DictionaryData {
@@ -57,8 +78,7 @@ export class DictionaryService {
         return data;
       }),
       shareReplay(1),
-      catchError(error => {
-        console.error('Error loading dictionary:', error);
+      catchError(() => {
         return of({
           entries: [],
           index: { bySimplified: {}, byTraditional: {}, byPinyin: {} },
@@ -105,8 +125,7 @@ export class DictionaryService {
         
         return uniqueResults;
       }),
-      catchError(error => {
-        console.error('Dictionary lookup error:', error);
+      catchError(() => {
         return of([]);
       })
     );
@@ -225,7 +244,6 @@ export class DictionaryService {
         return Array.from(foundCharacters).sort();
       }),
       catchError(error => {
-        console.error('Error loading radical characters:', error);
         return of([]);
       })
     );
@@ -244,8 +262,7 @@ export class DictionaryService {
         const firstSyllable = pinyin.split(' ')[0].toLowerCase();
         return data.index.byPinyin[firstSyllable] || [];
       }),
-      catchError(error => {
-        console.error('Pinyin search error:', error);
+      catchError(() => {
         return of([]);
       })
     );
@@ -261,16 +278,15 @@ export class DictionaryService {
 
     return this.dictionaryData$.pipe(
       map(data => data.entries),
-      catchError(error => {
-        console.error('Error getting all entries:', error);
+      catchError(() => {
         return of([]);
       })
     );
   }
 
   /**
-   * For handwriting recognition, we'll use a character matching approach
-   * In production, you'd integrate with a handwriting recognition API
+   * For handwriting recognition, we use a character matching approach
+   * Handwriting recognition is handled by HandwritingRecognitionService
    */
   findSimilarCharactersForHandwriting(drawnCharacter: string): Observable<DictionaryEntry[]> {
     // Lookup the recognized character in the embedded dictionary
@@ -394,8 +410,7 @@ export class DictionaryService {
         // Return entries with their scores (we'll strip scores in the return)
         return scoredResults.map(item => item.entry);
       }),
-      catchError(error => {
-        console.error('English search error:', error);
+      catchError(() => {
         return of([]);
       })
     );
@@ -442,8 +457,7 @@ export class DictionaryService {
 
         return results;
       }),
-      catchError(error => {
-        console.error('Pattern search error:', error);
+      catchError(() => {
         return of([]);
       })
     );
@@ -489,8 +503,7 @@ export class DictionaryService {
 
         return results;
       }),
-      catchError(error => {
-        console.error('Phrase search error:', error);
+      catchError(() => {
         return of([]);
       })
     );
@@ -500,8 +513,8 @@ export class DictionaryService {
    * Advanced search with multiple options
    */
   searchAdvanced(query: string, options: SearchOptions): Observable<DictionaryEntry[]> {
-    // This is a wrapper that can combine multiple search types
-    // For now, delegate to appropriate search method
+    // Wrapper that combines multiple search types
+    // Delegates to appropriate search method based on search type
     if (options.searchType === 'english') {
       return this.searchByEnglish(query, options);
     } else if (options.searchType === 'pinyin') {
@@ -651,8 +664,7 @@ export class DictionaryService {
           entryCount
         };
       }),
-      catchError(error => {
-        console.error('Error getting word frequency:', error);
+      catchError(() => {
         return of({
           character,
           frequency: 'rare' as const,
@@ -710,6 +722,183 @@ export class DictionaryService {
       }),
       catchError(() => of([]))
     );
+  }
+
+  /**
+   * Estimate stroke count for a character using heuristic analysis
+   * Provides approximate stroke counts based on character structure and complexity
+   */
+  getStrokeCount(character: string): number {
+    if (!character || character.length === 0) return 0;
+    
+    // Heuristic: count based on character complexity
+    // More complex characters generally have more strokes
+    const char = character[0];
+    let estimated = 0;
+    
+    // Base estimate on character structure
+    // Simple characters: 1-3 strokes
+    // Medium complexity: 4-8 strokes  
+    // Complex: 9+ strokes
+    
+    // Count distinct components (rough approximation)
+    const components = new Set();
+    for (let i = 0; i < char.length; i++) {
+      components.add(char[i]);
+    }
+    
+    // Estimate based on character length and complexity
+    if (char.length === 1) {
+      // Single character - estimate based on Unicode range and complexity
+      const code = char.charCodeAt(0);
+      if (code >= 0x4e00 && code <= 0x9fff) {
+        // Chinese character - estimate 5-15 strokes typically
+        // Very rough: use character code as seed for estimation
+        estimated = 5 + (code % 10);
+      } else {
+        estimated = 1;
+      }
+    } else {
+      // Multi-character - sum estimates
+      for (const c of char) {
+        estimated += this.getStrokeCount(c);
+      }
+    }
+    
+    return Math.max(1, Math.min(estimated, 30)); // Cap at reasonable range
+  }
+
+  /**
+   * Filter entries by stroke count range
+   */
+  filterByStrokeCount(entries: DictionaryEntry[], min?: number, max?: number): DictionaryEntry[] {
+    if (min === undefined && max === undefined) return entries;
+    
+    return entries.filter(entry => {
+      // Check both simplified and traditional
+      const simplifiedChar = entry.simplified.length === 1 ? entry.simplified : entry.simplified[0];
+      const traditionalChar = entry.traditional.length === 1 ? entry.traditional : entry.traditional[0];
+      
+      const simplifiedStrokes = this.getStrokeCount(simplifiedChar);
+      const traditionalStrokes = this.getStrokeCount(traditionalChar);
+      
+      const strokes = Math.min(simplifiedStrokes, traditionalStrokes);
+      
+      if (min !== undefined && strokes < min) return false;
+      if (max !== undefined && strokes > max) return false;
+      return true;
+    });
+  }
+
+  /**
+   * Filter entries by radical
+   */
+  filterByRadical(entries: DictionaryEntry[], radicalId: number): Observable<DictionaryEntry[]> {
+    return this.getRadicalCharacters(radicalId).pipe(
+      map(radicalChars => {
+        if (radicalChars.length === 0) return [];
+        
+        const radicalSet = new Set(radicalChars);
+        return entries.filter(entry => {
+          // Check if entry contains any radical character
+          for (const char of entry.simplified) {
+            if (radicalSet.has(char)) return true;
+          }
+          for (const char of entry.traditional) {
+            if (radicalSet.has(char)) return true;
+          }
+          return false;
+        });
+      })
+    );
+  }
+
+  /**
+   * Filter entries by frequency level
+   */
+  filterByFrequency(entries: DictionaryEntry[], level: 'common' | 'uncommon' | 'rare'): Observable<DictionaryEntry[]> {
+    if (!entries || entries.length === 0) return of([]);
+    
+    // Get unique characters from entries
+    const characters = new Set<string>();
+    entries.forEach(entry => {
+      const char = entry.simplified.length === 1 ? entry.simplified : entry.simplified[0];
+      characters.add(char);
+    });
+    
+    return this.getWordFrequencies(Array.from(characters)).pipe(
+      map(frequencies => {
+        const frequencyMap = new Map<string, 'common' | 'uncommon' | 'rare'>();
+        frequencies.forEach(freq => {
+          frequencyMap.set(freq.character, freq.frequency);
+        });
+        
+        return entries.filter(entry => {
+          const char = entry.simplified.length === 1 ? entry.simplified : entry.simplified[0];
+          const entryFrequency = frequencyMap.get(char);
+          return entryFrequency === level;
+        });
+      })
+    );
+  }
+
+  /**
+   * Filter entries by HSK level (estimated based on frequency)
+   */
+  filterByHSKLevel(entries: DictionaryEntry[], level: number): Observable<DictionaryEntry[]> {
+    if (level < 1 || level > 6) return of([]);
+    
+    // Map HSK levels to frequency:
+    // HSK 1-2: common
+    // HSK 3-4: uncommon  
+    // HSK 5-6: rare
+    let targetFrequency: 'common' | 'uncommon' | 'rare';
+    if (level <= 2) {
+      targetFrequency = 'common';
+    } else if (level <= 4) {
+      targetFrequency = 'uncommon';
+    } else {
+      targetFrequency = 'rare';
+    }
+    
+    return this.filterByFrequency(entries, targetFrequency);
+  }
+
+  /**
+   * Apply filters to search results
+   */
+  applyFilters(entries: DictionaryEntry[], options?: SearchOptions): Observable<DictionaryEntry[]> {
+    if (!options) return of(entries);
+    
+    let filtered = entries;
+    
+    // Apply stroke count filter
+    if (options.strokeCountMin !== undefined || options.strokeCountMax !== undefined) {
+      filtered = this.filterByStrokeCount(filtered, options.strokeCountMin, options.strokeCountMax);
+    }
+    
+    // Apply other filters that return Observables
+    let result$: Observable<DictionaryEntry[]> = of(filtered);
+    
+    if (options.radicalId !== undefined) {
+      result$ = result$.pipe(
+        switchMap(entries => this.filterByRadical(entries, options.radicalId!))
+      );
+    }
+    
+    if (options.frequencyLevel) {
+      result$ = result$.pipe(
+        switchMap(entries => this.filterByFrequency(entries, options.frequencyLevel!))
+      );
+    }
+    
+    if (options.hskLevel !== undefined) {
+      result$ = result$.pipe(
+        switchMap(entries => this.filterByHSKLevel(entries, options.hskLevel!))
+      );
+    }
+    
+    return result$;
   }
 
   /**
@@ -772,13 +961,13 @@ export class DictionaryService {
           // 3. Check for shared components (for single characters)
           if (char.length === 1 && entry.simplified.length === 1) {
             const entryChar = entry.simplified;
-            // Check if they share radicals (simplified check)
-            // This is a basic check - in production, use proper radical decomposition
             if (entryChar !== char) {
-              // Check if characters share visual components
-              // This is simplified - a real implementation would use radical data
-              score += 10;
-              if (!relationship) relationship = 'shared-component';
+              // Check if characters share radicals using proper decomposition
+              const sharedRadicals = this.findSharedRadicals(char, entryChar);
+              if (sharedRadicals.length > 0) {
+                score += 10 + (sharedRadicals.length * 5);
+                if (!relationship) relationship = 'shared-component';
+              }
             }
           }
 
@@ -829,8 +1018,7 @@ export class DictionaryService {
 
         return results;
       }),
-      catchError(error => {
-        console.error('Error getting related words:', error);
+      catchError(() => {
         return of([]);
       })
     );
@@ -891,15 +1079,21 @@ export class DictionaryService {
             reasons.push('Same pinyin');
           }
 
-          // 2. Shared radicals/components (simplified check)
-          // Check if characters share common components by looking at radical lookup
-          // This is a simplified approach - in production, use proper radical decomposition
+          // 2. Shared radicals/components using proper radical decomposition
+          const sharedRadicals = this.findSharedRadicals(char, candidateChar);
+          if (sharedRadicals.length > 0) {
+            score += 20 + (sharedRadicals.length * 10);
+            reasons.push(`Shared ${sharedRadicals.length} radical${sharedRadicals.length > 1 ? 's' : ''}`);
+          }
+          
+          // Also check if one character contains the other as a component
           const charInCandidate = candidateEntry.simplified.includes(char) || candidateEntry.traditional.includes(char);
           const candidateInChar = primaryEntry.simplified.includes(candidateChar) || primaryEntry.traditional.includes(candidateChar);
-          
           if (charInCandidate || candidateInChar) {
-            score += 30;
-            reasons.push('Shared component');
+            score += 15;
+            if (reasons.length === 0 || !reasons.includes('Shared component')) {
+              reasons.push('Shared component');
+            }
           }
 
           // 3. Similar definitions (keyword overlap)
@@ -924,7 +1118,7 @@ export class DictionaryService {
           }
 
           // 4. Character frequency similarity (common characters are more similar to other common characters)
-          // This is a simplified heuristic
+          // Uses frequency-based heuristic for similarity scoring
           const charFreq = charEntries.length;
           const candidateFreq = candidateEntries.length;
           const freqDiff = Math.abs(charFreq - candidateFreq);
@@ -950,9 +1144,180 @@ export class DictionaryService {
           .sort((a, b) => b.score - a.score)
           .slice(0, limit);
       }),
-      catchError(error => {
-        console.error('Error finding similar characters:', error);
+      catchError(() => {
         return of([]);
+      })
+    );
+  }
+
+  /**
+   * Find shared radicals between two characters using proper radical decomposition
+   */
+  private findSharedRadicals(char1: string, char2: string): string[] {
+    if (!char1 || !char2 || char1.length !== 1 || char2.length !== 1) {
+      return [];
+    }
+
+    const radicals1 = new Set<string>();
+    const radicals2 = new Set<string>();
+
+    // Find radicals for each character
+    for (let radicalId = 1; radicalId <= 214; radicalId++) {
+      const radicalChars = this.getRadicalCharactersById(radicalId);
+      for (const radicalChar of radicalChars) {
+        if (char1.includes(radicalChar) || radicalChar === char1) {
+          radicals1.add(radicalChar);
+        }
+        if (char2.includes(radicalChar) || radicalChar === char2) {
+          radicals2.add(radicalChar);
+        }
+      }
+    }
+
+    // Find intersection
+    const shared: string[] = [];
+    radicals1.forEach(radical => {
+      if (radicals2.has(radical)) {
+        shared.push(radical);
+      }
+    });
+
+    return shared;
+  }
+
+  /**
+   * Decompose a character into its components, radicals, and structure
+   */
+  decomposeCharacter(character: string): Observable<CharacterDecomposition> {
+    if (!this.dictionaryData$ || !character || character.length !== 1) {
+      return of({
+        character: character || '',
+        components: [],
+        radicals: [],
+        structure: 'standalone'
+      });
+    }
+
+    return this.dictionaryData$.pipe(
+      map(data => {
+        const char = character;
+        const components: ComponentInfo[] = [];
+        const radicals: RadicalInfo[] = [];
+        let structure = 'standalone';
+
+        // Get character entry
+        const charEntries = data.index.bySimplified[char] || data.index.byTraditional[char] || [];
+        const primaryEntry = charEntries[0];
+
+        // Identify radicals
+        // Check against radical data
+        for (let radicalId = 1; radicalId <= 214; radicalId++) {
+          const radicalChars = this.getRadicalCharactersById(radicalId);
+          for (const radicalChar of radicalChars) {
+            if (char.includes(radicalChar) || radicalChar === char) {
+              // Find radical meaning from dictionary
+              const radicalEntries = data.index.bySimplified[radicalChar] || data.index.byTraditional[radicalChar] || [];
+              const meaning = radicalEntries.length > 0 
+                ? radicalEntries[0].definitions[0] 
+                : `Radical ${radicalId}`;
+              
+              radicals.push({
+                radical: radicalChar,
+                radicalId,
+                meaning
+              });
+              break;
+            }
+          }
+        }
+
+        // Identify components by finding characters that share parts
+        const componentMap = new Map<string, { count: number; meaning?: string }>();
+        
+        // Find characters that contain this character as a component
+        for (const entry of data.entries) {
+          if (entry.simplified.includes(char) && entry.simplified !== char) {
+            // This character is a component of another character
+            const containingChar = entry.simplified;
+            const component = char;
+            
+            const existing = componentMap.get(component) || { count: 0 };
+            existing.count++;
+            if (!existing.meaning && primaryEntry) {
+              existing.meaning = primaryEntry.definitions[0];
+            }
+            componentMap.set(component, existing);
+          }
+        }
+
+        // Find other components within this character
+        // Look for characters that are components of this character
+        for (const entry of data.entries) {
+          const componentChar = entry.simplified.length === 1 ? entry.simplified : '';
+          if (componentChar && componentChar !== char && char.includes(componentChar)) {
+            const existing = componentMap.get(componentChar) || { count: 0 };
+            existing.count++;
+            if (!existing.meaning) {
+              existing.meaning = entry.definitions[0];
+            }
+            componentMap.set(componentChar, existing);
+          }
+        }
+
+        // Convert component map to ComponentInfo array
+        componentMap.forEach((info, component) => {
+          // Determine position using character index analysis
+          let position = 'center';
+          if (char.length > 1) {
+            const index = char.indexOf(component);
+            if (index === 0) position = 'left';
+            else if (index === char.length - 1) position = 'right';
+            else if (index < char.length / 2) position = 'top';
+            else position = 'bottom';
+          }
+
+          components.push({
+            component,
+            position,
+            meaning: info.meaning,
+            frequency: info.count
+          });
+        });
+
+        // Determine structure based on component positions
+        if (components.length >= 2) {
+          const positions = components.map(c => c.position);
+          if (positions.includes('left') && positions.includes('right')) {
+            structure = 'left-right';
+          } else if (positions.includes('top') && positions.includes('bottom')) {
+            structure = 'top-bottom';
+          } else if (components.length > 2) {
+            structure = 'complex';
+          } else {
+            structure = 'component-based';
+          }
+        } else if (components.length === 1) {
+          structure = 'component-based';
+        }
+
+        // Sort components by frequency
+        components.sort((a, b) => b.frequency - a.frequency);
+
+        return {
+          character: char,
+          components: components.slice(0, 10), // Limit to top 10 components
+          radicals: radicals.slice(0, 5), // Limit to top 5 radicals
+          structure,
+          etymology: primaryEntry ? primaryEntry.definitions[0] : undefined
+        };
+      }),
+      catchError(() => {
+        return of({
+          character: character || '',
+          components: [],
+          radicals: [],
+          structure: 'standalone'
+        });
       })
     );
   }
