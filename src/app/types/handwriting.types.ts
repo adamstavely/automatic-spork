@@ -29,3 +29,5 @@ export interface RecognitionResult {
   confidence: number;
   alternatives: string[];
 }
+
+

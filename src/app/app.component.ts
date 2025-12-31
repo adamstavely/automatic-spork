@@ -92,6 +92,22 @@ export class AppComponent implements OnInit {
   constructor(private settingsService: SettingsService) {}
 
   ngOnInit() {
+    // CACHE BUSTER: This log runs immediately when app component loads
+    const APP_VERSION = 'v5_' + Date.now();
+    console.error('🚨🚨🚨 APP COMPONENT LOADED v5 🚨🚨🚨', APP_VERSION);
+    console.error('🚨 If you do NOT see this message, browser is using CACHED code! 🚨');
+    
+    // Unregister any service workers in development to prevent caching issues
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(registrations => {
+        registrations.forEach(registration => {
+          registration.unregister().then(() => {
+            console.log('[App] Service worker unregistered to prevent caching issues');
+          });
+        });
+      });
+    }
+    
     this.fontSize = this.settingsService.getFontSize();
     this.showSimplified = this.settingsService.getShowSimplified();
     

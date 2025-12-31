@@ -38,3 +38,5 @@ export interface HanziWriterStatic {
   create: (element: HTMLElement | string, character: string, options?: HanziWriterOptions) => HanziWriterInstance;
   loadCharacterData: (character: string, callback: (data: any) => void) => void;
 }
+
+

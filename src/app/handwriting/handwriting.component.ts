@@ -196,14 +196,34 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
         return path.map(point => [point.x, point.y] as [number, number]);
       });
       
-      // Get multiple recognition candidates (increased to 100 to catch characters like 大 that rank lower)
+      // Get multiple recognition candidates (increased to 300 to catch characters like 大 that rank lower)
+      // 大 was found at rank 145, so we need to capture more results
+      // Pass canvas for image-based recognition
       const results = await firstValueFrom(
-        this.recognitionService.recognizeDrawAhead(strokes, 100).pipe(
+        this.recognitionService.recognizeDrawAhead(strokes, this.canvas, 300).pipe(
           catchError(() => of([]))
         )
       );
       
       if (results && results.length > 0) {
+        // Quick check: verify 大 exists in dictionary
+        this.dictionaryService.lookupCharacter('大').subscribe(entries => {
+          console.log('[Recognition] Dictionary lookup test for 大:', {
+            found: entries.length > 0,
+            entryCount: entries.length,
+            firstEntry: entries.length > 0 ? {
+              simplified: entries[0].simplified,
+              pinyin: entries[0].pinyin,
+              definitions: entries[0].definitions.slice(0, 2)
+            } : null
+          });
+        });
+        
+        console.log('[Recognition] Processing recognition results for dictionary lookup:', {
+          totalResults: results.length,
+          characters: results.map(r => r.character).slice(0, 20)
+        });
+        
         // Look up dictionary entries for each character
         const lookupPromises = results.map(result => {
           if (!result.character) return null;
@@ -219,18 +239,35 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
                     definitions: entry.definitions,
                     confidence: result.confidence
                   } as DrawAheadMatch);
+                } else {
+                  // Log when dictionary lookup fails
+                  console.log(`[Recognition] Character ${result.character} filtered out - no dictionary entry (confidence: ${Math.round(result.confidence * 100)}%)`);
+                  // Show character even without dictionary entry (with placeholder info)
+                  return of({
+                    character: result.character!,
+                    pinyin: '?',
+                    definitions: ['No dictionary entry available'],
+                    confidence: result.confidence
+                  } as DrawAheadMatch);
                 }
-                return of(null);
               })
             )
           );
         });
         
         const matches = await Promise.all(lookupPromises);
-        // Filter out null results and sort by confidence (highest first)
-        this.drawAheadMatches = matches
-          .filter((match): match is DrawAheadMatch => match !== null)
-          .sort((a, b) => b.confidence - a.confidence);
+        // Filter out null results
+        // Don't sort - preserve HanziLookup's original ranking (by score, ascending - lower = better)
+        const validMatches = matches.filter((match): match is DrawAheadMatch => match !== null);
+        
+        console.log('[Recognition] Final matches after dictionary lookup:', {
+          totalMatches: validMatches.length,
+          characters: validMatches.map(m => m.character).slice(0, 20),
+          daInResults: validMatches.findIndex(m => m.character === '大') !== -1 ? 'YES' : 'NO'
+        });
+        
+        // Preserve original order from recognition service (HanziLookup ranking by score)
+        this.drawAheadMatches = validMatches;
       } else {
         this.drawAheadMatches = [];
       }
@@ -404,5 +441,10 @@ export class HandwritingComponent implements AfterViewInit, OnInit {
 
   getConfidencePercentage(confidence: number): number {
     return Math.round(confidence * 100);
+  }
+
+  runDiagnostic(): void {
+    console.log('Starting diagnostic test...');
+    this.recognitionService.testDaVariants();
   }
 }

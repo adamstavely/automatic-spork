@@ -219,3 +219,5 @@ export class PinyinInputService {
     return pinyinPattern.test(input) && (hasTone || /^[a-züv]+$/i.test(input.replace(/\s/g, '')));
   }
 }
+
+

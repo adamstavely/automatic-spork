@@ -147,3 +147,5 @@ export class SearchHistoryService {
     return groups.filter(group => group.items.length > 0);
   }
 }
+
+

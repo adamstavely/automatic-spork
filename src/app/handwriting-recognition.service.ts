@@ -1,8 +1,12 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
-import { Observable, of, from } from 'rxjs';
-import { catchError, map, switchMap } from 'rxjs/operators';
+import { Observable, of, from, forkJoin, throwError } from 'rxjs';
+import { catchError, map, switchMap, timeout } from 'rxjs/operators';
 import { DictionaryService } from './dictionary.service';
+import { StrokePreprocessingService } from './stroke-preprocessing.service';
+import { TensorflowRecognitionService } from './tensorflow-recognition.service';
+import { StrokeMatcherService } from './stroke-matcher.service';
+import { ImageRecognitionService } from './image-recognition.service';
 import { RecognitionResult, StrokeFeatures, CharacterPattern, CharacterMatch } from './types/handwriting.types';
 
 // Type declaration for HanziLookupJS
@@ -32,13 +36,98 @@ export class HandwritingRecognitionService {
   private characterDatabaseReady = false;
   private characterDatabaseInitializing = false;
   
+  // Option to bypass preprocessing for testing/comparison
+  private usePreprocessing = true; // Can be toggled to test without preprocessing
+
+  /**
+   * Frequency boost data based on HSK (Hanyu Shuiping Kaoshi) frequency and common usage
+   * Lower values = better (score is multiplied by this, so 0.70 = 30% boost)
+   */
+  private readonly COMMON_CHAR_FREQUENCY: { [char: string]: number } = {
+    // Tier 1: Most common (HSK 1-2) - 30% boost
+    '大': 0.70, '人': 0.70, '中': 0.70, '小': 0.70, '上': 0.70, '下': 0.70,
+    '天': 0.70, '不': 0.70, '是': 0.70, '我': 0.70, '你': 0.70, '他': 0.70,
+    '她': 0.70, '们': 0.70, '这': 0.70, '那': 0.70, '来': 0.70, '去': 0.70,
+    '好': 0.70, '在': 0.70, '有': 0.70, '个': 0.70, '了': 0.70, '的': 0.70,
+    '一': 0.70, '二': 0.70, '三': 0.70, '四': 0.70, '五': 0.70, '六': 0.70,
+    '七': 0.70, '八': 0.70, '九': 0.70, '十': 0.70, '百': 0.70, '千': 0.70,
+    '年': 0.70, '月': 0.70, '日': 0.70, '时': 0.70, '分': 0.70,
+    '几': 0.70, '多': 0.70, '少': 0.70, '么': 0.70, '什': 0.70,
+    '谁': 0.70, '哪': 0.70, '怎': 0.70, '为': 0.70,
+    
+    // Tier 2: Very common (HSK 2-3) - 20% boost
+    '看': 0.80, '做': 0.80, '说': 0.80, '吃': 0.80, '喝': 0.80, '学': 0.80,
+    '会': 0.80, '能': 0.80, '可': 0.80, '要': 0.80, '想': 0.80, '知': 0.80,
+    '道': 0.80, '候': 0.80, '字': 0.80, '号': 0.80, '书': 0.80, '本': 0.80,
+    '很': 0.80, '太': 0.80, '都': 0.80, '没': 0.80, '还': 0.80, '也': 0.80,
+    '就': 0.80, '和': 0.80, '跟': 0.80, '与': 0.80, '给': 0.80, '被': 0.80,
+    
+    // Tier 3: Common (HSK 3-4) - 15% boost
+    '生': 0.85, '活': 0.85, '工': 0.85, '作': 0.85, '问': 0.85, '题': 0.85,
+    '事': 0.85, '情': 0.85, '意': 0.85, '思': 0.85, '觉': 0.85, '得': 0.85,
+    '应': 0.85, '该': 0.85, '必': 0.85, '须': 0.85, '需': 0.85, '用': 0.85,
+    '心': 0.85, '爱': 0.85, '喜': 0.85, '欢': 0.85, '高': 0.85, '兴': 0.85,
+    '快': 0.85, '乐': 0.85, '开': 0.85, '关': 0.85, '始': 0.85, '结': 0.85,
+    '束': 0.85, '完': 0.85, '成': 0.85, '帮': 0.85, '助': 0.85, '谢': 0.85,
+    
+    // Common family/people terms
+    '妈': 0.75, '爸': 0.75, '哥': 0.75, '姐': 0.75, '弟': 0.75, '妹': 0.75,
+    '子': 0.75, '女': 0.75, '男': 0.75, '老': 0.75, '师': 0.75, '友': 0.75,
+    
+    // Common location/direction
+    '里': 0.75, '外': 0.75, '前': 0.75, '后': 0.75, '左': 0.75, '右': 0.75,
+    '东': 0.75, '西': 0.75, '南': 0.75, '北': 0.75, '国': 0.75, '家': 0.75,
+    
+    // Common actions
+    '走': 0.80, '跑': 0.80, '站': 0.80, '坐': 0.80, '睡': 0.80, '起': 0.80,
+    '买': 0.80, '卖': 0.80, '玩': 0.80, '住': 0.80, '听': 0.80, '读': 0.80,
+    '写': 0.80, '见': 0.80, '面': 0.80, '打': 0.80, '找': 0.80, '等': 0.80,
+  };
+  
+  // Hybrid recognition configuration
+  private readonly FUSION_WEIGHTS = {
+    tensorflow: 0.5,      // α - TensorFlow.js weight
+    strokeMatcher: 0.3,   // β - Stroke matcher weight
+    imageRecognition: 0.2 // γ - Image-based OCR weight
+  };
+
   constructor(
     private http: HttpClient,
-    private dictionaryService: DictionaryService
+    private dictionaryService: DictionaryService,
+    private strokePreprocessingService: StrokePreprocessingService,
+    private tensorflowService: TensorflowRecognitionService,
+    private strokeMatcherService: StrokeMatcherService,
+    private imageRecognitionService: ImageRecognitionService
   ) {
-    // Wait for script to load before initializing
+    // CACHE BUSTER v6: This log runs immediately when service is instantiated
+    const VERSION = 'v6_' + Date.now();
+    console.log('========================================');
+    console.log('🚨🚨🚨 HANDWRITING RECOGNITION SERVICE LOADED v6 🚨🚨🚨', VERSION);
+    console.log('🚨 HYBRID SYSTEM IS DISABLED - LEGACY ONLY 🚨');
+    console.log('🚨 If you do NOT see this message, browser is using CACHED code! 🚨');
+    console.log('========================================');
+    console.error('CACHE BUSTER v6:', VERSION);
+    alert('CACHE BUSTER: If you see this alert, new code is loaded! Version: ' + VERSION);
+    
+    // Wait for script to load before initializing (legacy - will be removed in Phase 6)
     this.waitForHanziLookupAndInit();
     this.buildCharacterDatabase();
+  }
+
+  /**
+   * Enable or disable preprocessing
+   * Set to false to bypass preprocessing and test recognition accuracy
+   */
+  setPreprocessingEnabled(enabled: boolean): void {
+    this.usePreprocessing = enabled;
+    console.log(`[Recognition] Preprocessing ${enabled ? 'enabled' : 'disabled'}`);
+  }
+
+  /**
+   * Check if preprocessing is currently enabled
+   */
+  isPreprocessingEnabled(): boolean {
+    return this.usePreprocessing;
   }
 
   /**
@@ -182,9 +271,9 @@ export class HandwritingRecognitionService {
    */
   recognizeFromCanvas(canvas: HTMLCanvasElement, strokes?: number[][][]): Observable<RecognitionResult> {
     try {
-      // First try stroke-based recognition if strokes are provided
+      // First try hybrid approach (stroke-based + image-based) if strokes are provided
       if (strokes && strokes.length > 0) {
-        return this.recognizeFromStrokes(strokes).pipe(
+        return this.recognizeFromStrokes(strokes, canvas).pipe(
           switchMap(result => {
             // If stroke-based recognition found something with reasonable confidence, return it
             if (result.character && result.confidence > 0.3) {
@@ -270,9 +359,215 @@ export class HandwritingRecognitionService {
     });
   }
 
+  /**
+   * Fuse results from TensorFlow.js, stroke matcher, and image recognition
+   * Combines results with weighted confidence scores
+   */
+  private fuseResults(
+    tfResults: RecognitionResult[],
+    strokeResults: RecognitionResult[],
+    imageResults: RecognitionResult[],
+    maxResults: number = 20
+  ): RecognitionResult[] {
+    // Create a map to combine results by character
+    const resultMap = new Map<string, {
+      character: string;
+      tfConfidence: number;
+      strokeConfidence: number;
+      imageConfidence: number;
+      fusedConfidence: number;
+    }>();
+
+    // Add TensorFlow results
+    tfResults.forEach((result, index) => {
+      if (result.character) {
+        const normalizedConfidence = result.confidence || (1 - index * 0.05);
+        resultMap.set(result.character, {
+          character: result.character,
+          tfConfidence: normalizedConfidence,
+          strokeConfidence: 0,
+          imageConfidence: 0,
+          fusedConfidence: normalizedConfidence * this.FUSION_WEIGHTS.tensorflow
+        });
+      }
+    });
+
+    // Add stroke matcher results and combine
+    strokeResults.forEach((result, index) => {
+      if (result.character) {
+        const normalizedConfidence = result.confidence || (1 - index * 0.05);
+        const existing = resultMap.get(result.character);
+        
+        if (existing) {
+          // Character found in multiple methods - combine confidences
+          existing.strokeConfidence = normalizedConfidence;
+          existing.fusedConfidence = 
+            existing.tfConfidence * this.FUSION_WEIGHTS.tensorflow +
+            normalizedConfidence * this.FUSION_WEIGHTS.strokeMatcher +
+            existing.imageConfidence * this.FUSION_WEIGHTS.imageRecognition;
+        } else {
+          // Character only in stroke matcher
+          resultMap.set(result.character, {
+            character: result.character,
+            tfConfidence: 0,
+            strokeConfidence: normalizedConfidence,
+            imageConfidence: 0,
+            fusedConfidence: normalizedConfidence * this.FUSION_WEIGHTS.strokeMatcher
+          });
+        }
+      }
+    });
+
+    // Add image recognition results and combine
+    imageResults.forEach((result, index) => {
+      if (result.character) {
+        const normalizedConfidence = result.confidence || (1 - index * 0.05);
+        const existing = resultMap.get(result.character);
+        
+        if (existing) {
+          // Character found in multiple methods - combine confidences
+          existing.imageConfidence = normalizedConfidence;
+          existing.fusedConfidence = 
+            existing.tfConfidence * this.FUSION_WEIGHTS.tensorflow +
+            existing.strokeConfidence * this.FUSION_WEIGHTS.strokeMatcher +
+            normalizedConfidence * this.FUSION_WEIGHTS.imageRecognition;
+        } else {
+          // Character only in image recognition
+          resultMap.set(result.character, {
+            character: result.character,
+            tfConfidence: 0,
+            strokeConfidence: 0,
+            imageConfidence: normalizedConfidence,
+            fusedConfidence: normalizedConfidence * this.FUSION_WEIGHTS.imageRecognition
+          });
+        }
+      }
+    });
+
+    // No boosting - use raw fused confidence scores
+    const boostedResults = Array.from(resultMap.values()).map(result => ({
+      ...result,
+      fusedConfidence: Math.min(1, result.fusedConfidence) // Cap at 1.0
+    }));
+
+    // Sort by fused confidence (descending)
+    boostedResults.sort((a, b) => b.fusedConfidence - a.fusedConfidence);
+
+    // Convert to RecognitionResult format
+    const finalResults: RecognitionResult[] = boostedResults.slice(0, maxResults).map(result => ({
+      character: result.character,
+      confidence: Math.min(1, result.fusedConfidence),
+      alternatives: []
+    }));
+
+    return finalResults;
+  }
 
   /**
-   * Check if HanziLookup is ready for recognition
+   * Hybrid recognition using TensorFlow.js, stroke matcher, and image recognition
+   * Strokes format: [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
+   * Canvas is optional - if provided, will use for image-based recognition
+   */
+  private recognizeHybrid(
+    strokes: number[][][], 
+    canvas?: HTMLCanvasElement,
+    maxResults: number = 20
+  ): Observable<RecognitionResult[]> {
+    // Run all recognition methods in parallel
+    const tfObservable = this.tensorflowService.recognize(strokes, maxResults * 2).pipe(
+      timeout(3000), // 3 second timeout
+      catchError(error => {
+        console.warn('[Recognition] TensorFlow.js recognition failed:', error);
+        return of([]);
+      })
+    );
+
+    const strokeObservable = this.strokeMatcherService.match(strokes, maxResults * 2).pipe(
+      timeout(5000), // 5 second timeout (increased to allow database to load)
+      catchError(error => {
+        console.warn('[Recognition] Stroke matcher failed:', error);
+        return of([]);
+      }),
+      map(results => {
+        if (results.length === 0) {
+          console.warn('[Recognition] Stroke matcher returned no results for', strokes.length, 'strokes');
+        }
+        return results;
+      })
+    );
+
+    // Image recognition (if canvas provided)
+    const imageObservable = canvas 
+      ? this.imageRecognitionService.recognizeFromCanvas(canvas, maxResults * 2).pipe(
+          timeout(3000),
+          catchError(error => {
+            console.warn('[Recognition] Image recognition failed:', error);
+            return of([]);
+          })
+        )
+      : of([]);
+
+    // Combine results and filter by dictionary
+    return forkJoin({
+      tf: tfObservable,
+      stroke: strokeObservable,
+      image: imageObservable
+    }).pipe(
+      switchMap(({ tf, stroke, image }) => {
+        // Check dictionary but don't filter out - just mark which characters are in dictionary
+        // This allows all characters through, but we can prioritize dictionary entries later if needed
+        const checkDictionary = (results: RecognitionResult[]): Observable<RecognitionResult[]> => {
+          if (results.length === 0) {
+            return of([]);
+          }
+
+          // For now, just return all results without filtering
+          // Characters not in dictionary will still be shown
+          return of(results);
+        };
+
+        // Check all result sets (no filtering - show all characters)
+        return forkJoin({
+          tfFiltered: checkDictionary(tf),
+          strokeFiltered: checkDictionary(stroke),
+          imageFiltered: checkDictionary(image)
+        }).pipe(
+          switchMap(({ tfFiltered, strokeFiltered, imageFiltered }) => {
+            // Log what each method found
+            console.log('[Recognition] Results before fusion:', {
+              tensorflow: tfFiltered.length > 0 ? `${tfFiltered.length} results, top: ${tfFiltered[0]?.character} (${((tfFiltered[0]?.confidence || 0) * 100).toFixed(1)}%)` : 'none',
+              strokeMatcher: strokeFiltered.length > 0 ? `${strokeFiltered.length} results, top: ${strokeFiltered[0]?.character} (${((strokeFiltered[0]?.confidence || 0) * 100).toFixed(1)}%)` : 'none',
+              imageRecognition: imageFiltered.length > 0 ? `${imageFiltered.length} results, top: ${imageFiltered[0]?.character} (${((imageFiltered[0]?.confidence || 0) * 100).toFixed(1)}%)` : 'none'
+            });
+            
+            // If stroke matcher failed (no results), ALWAYS fall back to legacy
+            // Stroke matcher is the most reliable method - if it fails, hybrid system isn't working
+            if (strokeFiltered.length === 0) {
+              console.warn('[Recognition] Stroke matcher returned no results, falling back to legacy HanziLookup');
+              console.log('[Recognition] Condition check - strokeFiltered.length:', strokeFiltered.length, 'tfFiltered.length:', tfFiltered.length, 'imageFiltered.length:', imageFiltered.length);
+              return throwError(() => new Error('Stroke matcher failed - using legacy'));
+            }
+            
+            const fused = this.fuseResults(tfFiltered, strokeFiltered, imageFiltered, maxResults);
+            
+            console.log('[Recognition] After fusion, top 5:', fused.slice(0, 5).map(r => 
+              `${r.character} (${(r.confidence * 100).toFixed(1)}%)`
+            ));
+            
+            return of(fused);
+          })
+        );
+      }),
+      catchError(error => {
+        console.error('[Recognition] Hybrid recognition error, falling back to legacy:', error);
+        // Fallback to legacy HanziLookup which is more reliable
+        return this.recognizeDrawAheadLegacy(strokes, maxResults);
+      })
+    );
+  }
+
+  /**
+   * Check if HanziLookup is ready for recognition (legacy - will be removed)
    */
   isReady(): boolean {
     return this.hanzilookupReady && typeof HanziLookup !== 'undefined';
@@ -283,41 +578,39 @@ export class HandwritingRecognitionService {
    * Based on stroke count, character complexity, and matching context
    */
   private calculateLooseness(strokeCount: number, isDrawAhead: boolean = false): number {
-    // Optimized looseness values for better accuracy
-    // Lower values = stricter matching (more accurate), higher = more lenient (more false positives)
-    // Start with tighter matching for better accuracy
-    let baseLooseness = 0.14;
-    
-    // Adjust based on stroke count
-    // Tighter matching for simple characters, slightly more lenient for complex ones
-    if (strokeCount >= 5) {
-      baseLooseness = 0.15; // Complex characters can use slightly more leniency
-    } else if (strokeCount >= 4) {
-      baseLooseness = 0.145; // 4 strokes like 文
-    } else if (strokeCount === 3) {
-      baseLooseness = 0.14; // 3 strokes like 大 - tight matching for accuracy
-    } else if (strokeCount === 2) {
-      baseLooseness = 0.135; // 2 strokes - very tight for accuracy
-    } else if (strokeCount === 1) {
-      baseLooseness = 0.13; // Single strokes need very precise matching
-    }
-    
-    // Draw-ahead (partial recognition) needs slightly more leniency
-    // since we're matching incomplete characters
+    // Stricter looseness values to prevent matching characters with very different stroke counts
+    // Lower values = stricter matching, higher = more lenient
+    const baseLooseness: { [key: number]: number } = {
+      1: 0.12,   // Stricter
+      2: 0.13,   // Stricter
+      3: 0.14,   // Stricter - was 0.20, too lenient
+      4: 0.14,   // Stricter
+      5: 0.15,   // Stricter
+      6: 0.15,   // Stricter
+      7: 0.16,   // Stricter
+      8: 0.16,   // Stricter
+      9: 0.17,   // Stricter
+      10: 0.17,  // Stricter
+      11: 0.18,  // Stricter
+      12: 0.18,  // Stricter
+    };
+
+    let looseness = baseLooseness[strokeCount] ?? 0.18;
+
     if (isDrawAhead) {
-      baseLooseness += 0.005; // Small increase for partial matches
+      looseness += 0.005;
     }
-    
-    // Clamp to reasonable range - keep it tight for accuracy
-    return Math.max(0.12, Math.min(0.17, baseLooseness));
+
+    return looseness;
   }
 
   /**
    * Client-side stroke-based recognition
-   * Uses HanziLookupJS as primary method, falls back to basic matching
+   * Uses hybrid approach (TensorFlow.js + stroke matcher + image recognition) as primary method
+   * Falls back to legacy HanziLookupJS if hybrid fails
    * Strokes format: [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
    */
-  recognizeFromStrokes(strokes: number[][][]): Observable<RecognitionResult> {
+  recognizeFromStrokes(strokes: number[][][], canvas?: HTMLCanvasElement): Observable<RecognitionResult> {
     if (!strokes || strokes.length === 0) {
       return of({
         character: null,
@@ -326,10 +619,47 @@ export class HandwritingRecognitionService {
       });
     }
 
+    // FORCE LEGACY SYSTEM - HYBRID DISABLED v6
+    // If you see "Results before fusion" in console, browser is using CACHED CODE!
+    console.log('========================================');
+    console.log('🚨🚨🚨 recognizeFromStrokes: LEGACY SYSTEM FORCED v6 🚨🚨🚨');
+    console.log('🚨 HYBRID SYSTEM IS DISABLED - USING LEGACY ONLY 🚨');
+    console.log('If you see recognizeHybrid or "Results before fusion", BROWSER IS CACHED!');
+    console.log('========================================');
+    return this.recognizeFromStrokesLegacy(strokes);
+
+    // DISABLED: Hybrid approach
+    // return this.recognizeHybrid(strokes, canvas, 20).pipe(
+    //   switchMap(results => {
+    //     if (results && results.length > 0 && results[0].character && results[0].confidence > 0.3) {
+    //       // Hybrid approach succeeded
+    //       return of({
+    //         character: results[0].character,
+    //         confidence: results[0].confidence,
+    //         alternatives: results.slice(1, 6).map(r => r.character).filter((c): c is string => c !== null)
+    //       });
+    //     }
+
+    //     // Fallback to legacy HanziLookupJS if hybrid didn't produce good results
+    //     console.log('[Recognition] Hybrid approach produced low confidence, trying legacy HanziLookup');
+    //     return this.recognizeFromStrokesLegacy(strokes);
+    //   }),
+    //   catchError(error => {
+    //     console.error('[Recognition] Hybrid recognition failed, using legacy fallback:', error);
+    //     return this.recognizeFromStrokesLegacy(strokes);
+    //   })
+    // );
+  }
+
+  /**
+   * Legacy HanziLookupJS recognition (will be removed in Phase 6)
+   * Strokes format: [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
+   */
+  private recognizeFromStrokesLegacy(strokes: number[][][]): Observable<RecognitionResult> {
     // Normalize and preprocess stroke data
     const normalizedStrokes = this.normalizeStrokes(strokes);
     
-    // Try HanziLookupJS first if available and ready
+    // Try HanziLookupJS if available and ready
     if (this.isReady()) {
       return new Observable<RecognitionResult>(observer => {
         try {
@@ -410,16 +740,82 @@ export class HandwritingRecognitionService {
               // Sort by score ascending (lowest/best first)
               validResults.sort((a, b) => a.score - b.score);
               
-              // Log top results after sorting to verify
-              console.log('Top 10 results after sorting:', validResults.slice(0, 10).map((r, i) => `${i+1}. ${r.character} (${r.score.toFixed(2)})`).join(', '));
+              // No boosting - use raw results directly
+              const rawResults = validResults;
+              
+              console.log('Recognition (no boost):', {
+                totalResults: rawResults.length,
+                topResult: rawResults[0]?.character,
+                topScore: rawResults[0]?.score?.toFixed(2),
+                top10: rawResults.slice(0, 10).map(r => 
+                  `${r.character}(${r.score.toFixed(2)})`
+                )
+              });
+              
+              // PHASE 2: Check if we should retry with multi-hypothesis
+              const shouldRetry = this.shouldRetryWithMultiHypothesis(rawResults, strokes.length);
+              
+              if (shouldRetry) {
+                console.log('⚠️ Low confidence detected, retrying with multi-hypothesis...');
+                
+                // Get preprocessed strokes for multi-hypothesis (bypass normalization's preprocessing)
+                const preprocessedStrokes = this.usePreprocessing
+                  ? this.strokePreprocessingService.preprocessStrokes(strokes)
+                  : strokes;
+                
+                // Retry with multiple aspect ratios (enhanced version with 5 hypotheses)
+                this.recognizeWithEnhancedHypotheses(preprocessedStrokes, looseness).subscribe({
+                  next: (multiHypResults) => {
+                    // No boosting - use raw multi-hypothesis results
+                    const finalResults = multiHypResults;
+                    
+                    console.log('🎯 After multi-hypothesis (no boost):', {
+                      topChar: finalResults[0]?.character,
+                      topScore: finalResults[0]?.score?.toFixed(2),
+                      bestHypothesis: multiHypResults[0]?.hypothesis
+                    });
+                    
+                    // Use multi-hypothesis results
+                    const bestResult = finalResults[0];
+                    const confidence = this.calculateConfidence(finalResults, 0);
+                    const alternatives = finalResults.slice(1, 11).map(r => r.character);
+                    
+                    observer.next({
+                      character: bestResult.character,
+                      confidence: confidence,
+                      alternatives: alternatives
+                    });
+                    observer.complete();
+                  },
+                  error: (error) => {
+                    console.error('Multi-hypothesis error, using standard results:', error);
+                    // Fall back to standard results
+                    const bestResult = rawResults[0];
+                    const confidence = this.calculateConfidence(rawResults, 0);
+                    const alternatives = rawResults.slice(1, 11).map(r => r.character);
+                    
+                    observer.next({
+                      character: bestResult.character,
+                      confidence: confidence,
+                      alternatives: alternatives
+                    });
+                    observer.complete();
+                  }
+                });
+                return; // Exit early, multi-hypothesis will complete the observer
+              }
+              
+              // Fast path: Use standard results (no boosting)
+              // Log top results
+              console.log('Top 10 results (no boost):', rawResults.slice(0, 10).map((r, i) => `${i+1}. ${r.character} (${r.score.toFixed(2)})`).join(', '));
               
               // Convert scores to confidence
-              // HanziLookupJS uses lower scores for better matches
-              const bestResult = validResults[0];
-              const confidence = this.calculateConfidence(validResults, 0);
+              // Use raw results for final selection
+              const bestResult = rawResults[0];
+              const confidence = this.calculateConfidence(rawResults, 0);
               
-              // Get alternatives from top results (no manual boosting)
-              const alternatives = validResults.slice(1, 11).map(r => r.character);
+              // Get alternatives from raw results
+              const alternatives = rawResults.slice(1, 11).map(r => r.character);
               
               console.log('Recognition result:', bestResult.character, 'confidence:', confidence, 'alternatives:', alternatives);
               
@@ -451,18 +847,44 @@ export class HandwritingRecognitionService {
 
   /**
    * Recognize multiple candidates for draw-ahead recognition
+   * Uses hybrid approach (TensorFlow.js + stroke matcher + image recognition)
    * Returns array of RecognitionResult objects with top N matches
    * Strokes format: [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
    */
-  recognizeDrawAhead(strokes: number[][][], maxResults: number = 20): Observable<RecognitionResult[]> {
+  recognizeDrawAhead(strokes: number[][][], canvas?: HTMLCanvasElement, maxResults: number = 20): Observable<RecognitionResult[]> {
     if (!strokes || strokes.length === 0) {
       return of([]);
     }
 
+    // FORCE LEGACY SYSTEM - HYBRID DISABLED v6
+    // If you see "Results before fusion" in console, browser is using CACHED CODE!
+    console.log('========================================');
+    console.log('🚨🚨🚨 recognizeDrawAhead: LEGACY SYSTEM FORCED v6 🚨🚨🚨');
+    console.log('🚨 HYBRID SYSTEM IS DISABLED - USING LEGACY ONLY 🚨');
+    console.log('If you see "Results before fusion", BROWSER IS CACHED!');
+    console.log('Using legacy HanziLookup for', strokes.length, 'strokes, maxResults:', maxResults);
+    console.log('========================================');
+    return this.recognizeDrawAheadLegacy(strokes, maxResults);
+
+    // Use hybrid approach for draw-ahead recognition (includes image recognition if canvas provided)
+    // return this.recognizeHybrid(strokes, canvas, maxResults).pipe(
+    //   catchError(error => {
+    //     console.warn('[Recognition] Hybrid draw-ahead failed, using legacy fallback:', error.message || error);
+    //     console.log('[Recognition] Falling back to legacy HanziLookup for', strokes.length, 'strokes');
+    //     return this.recognizeDrawAheadLegacy(strokes, maxResults);
+    //   })
+    // );
+  }
+
+  /**
+   * Legacy HanziLookupJS draw-ahead recognition (will be removed in Phase 6)
+   * Strokes format: [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
+   */
+  private recognizeDrawAheadLegacy(strokes: number[][][], maxResults: number = 20): Observable<RecognitionResult[]> {
     // Normalize and preprocess stroke data
     const normalizedStrokes = this.normalizeStrokes(strokes);
     
-    // Try HanziLookupJS first if available and ready
+    // Try HanziLookupJS if available and ready
     if (this.isReady()) {
       return new Observable<RecognitionResult[]>(observer => {
         try {
@@ -502,25 +924,15 @@ export class HandwritingRecognitionService {
           // Request more results to ensure we catch common characters
           matcher.match(analyzedChar, Math.max(maxResults, 500), (results: Array<{character: string, score: number}>) => {
             console.log('HanziLookup.Matcher.match (draw-ahead) callback called with results:', results?.length || 0);
-            // Log all results to help debug
+            
             if (results && results.length > 0) {
-              console.log('All draw-ahead results:', results.map(r => {
-                const scoreStr = (r.score !== -Infinity && r.score !== Infinity && !isNaN(r.score) && isFinite(r.score)) 
-                  ? r.score.toFixed(2) 
-                  : 'invalid';
-                return `${r.character} (score: ${scoreStr})`;
-              }).join(', '));
-              // Debug logging for recognition results
-              if (results.length > 0) {
-                console.log(`Top 5 results:`, results.slice(0, 5).map(r => {
-                  const scoreStr = (r.score !== -Infinity && r.score !== Infinity && !isNaN(r.score) && isFinite(r.score)) 
-                    ? r.score.toFixed(2) 
-                    : 'invalid';
-                  return `${r.character}(${scoreStr})`;
-                }).join(', '));
-              }
-            }
-            if (results && results.length > 0) {
+              // Identify top 10 characters from unsorted results (before filtering/sorting)
+              // These should be prioritized even if they have higher scores after sorting
+              const top10Unsorted = results.slice(0, 10)
+                .filter(r => r.score !== -Infinity && r.score !== Infinity && !isNaN(r.score) && isFinite(r.score))
+                .map(r => r.character);
+              const top10UnsortedSet = new Set(top10Unsorted);
+              
               // Filter out results with invalid scores (-Infinity, Infinity, NaN)
               const validResults = results.filter(r => 
                 r.score !== -Infinity && 
@@ -539,15 +951,165 @@ export class HandwritingRecognitionService {
               // Sort by score ascending (lowest/best first)
               validResults.sort((a, b) => a.score - b.score);
               
-              // Log top results after sorting for debugging
-              console.log(`Top ${Math.min(10, maxResults)} results after sorting:`, validResults.slice(0, Math.min(10, maxResults)).map((r, i) => `${i+1}. ${r.character} (${r.score.toFixed(2)})`).join(', '));
+              // Log top results AFTER sorting (this is the actual ranking)
+              console.log(`Top 5 results (sorted by score, ascending):`, validResults.slice(0, 5).map((r, i) => 
+                `${i+1}. ${r.character} (${r.score.toFixed(2)})`
+              ).join(', '));
               
-              // For draw-ahead, return top valid results (no manual boosting)
-              const topResults = validResults.slice(0, maxResults);
+              // Check if any top 10 unsorted characters are in the sorted results
+              const top10InSorted = top10Unsorted.filter(char => 
+                validResults.some(r => r.character === char)
+              );
+              if (top10InSorted.length > 0) {
+                console.log(`[Recognition] Top 10 unsorted characters found in results: ${top10InSorted.join(', ')}`);
+              }
+              
+              // Log raw HanziLookup results (no boosting)
+              const daIndex = validResults.findIndex(r => r.character === '大');
+              const daResult = validResults.find(r => r.character === '大');
+              console.log('[Recognition] Raw HanziLookup results (no boost):', {
+                totalResults: validResults.length,
+                top10: validResults.slice(0, 10).map((r, i) => `${i+1}. ${r.character} (${r.score.toFixed(2)})`),
+                daIndex: daIndex !== -1 ? daIndex : 'NOT FOUND',
+                daScore: daResult ? daResult.score.toFixed(2) : 'N/A',
+                daRank: daIndex !== -1 ? `${daIndex + 1} of ${validResults.length}` : 'NOT IN RESULTS'
+              });
+              
+              // No boosting - use raw results directly (HanziLookup already ranks by similarity)
+              const rawResults = validResults;
+              
+              // Store top10UnsortedSet and top10Unsorted array for use later in prioritization
+              (rawResults as any).__top10UnsortedSet = top10UnsortedSet;
+              (rawResults as any).__top10Unsorted = top10Unsorted;
+              
+              console.log('Draw-ahead recognition (no boost):', {
+                totalResults: rawResults.length,
+                topResult: rawResults[0]?.character,
+                topScore: rawResults[0]?.score?.toFixed(2),
+                top10: rawResults.slice(0, 10).map(r => 
+                  `${r.character}(${r.score.toFixed(2)})`
+                )
+              });
+              
+              // PHASE 2: Check if we should retry with multi-hypothesis (for draw-ahead, be more lenient)
+              const shouldRetry = this.shouldRetryWithMultiHypothesis(rawResults, strokes.length);
+              
+              if (shouldRetry) {
+                console.log('⚠️ Low confidence detected in draw-ahead, retrying with multi-hypothesis...');
+                
+                // Get preprocessed strokes for multi-hypothesis (bypass normalization's preprocessing)
+                const preprocessedStrokes = this.usePreprocessing
+                  ? this.strokePreprocessingService.preprocessStrokes(strokes)
+                  : strokes;
+                
+                // Retry with multiple aspect ratios (enhanced version with 5 hypotheses)
+                this.recognizeWithEnhancedHypotheses(preprocessedStrokes, looseness).subscribe({
+                  next: (multiHypResults) => {
+                    // No boosting - use raw multi-hypothesis results
+                    const finalResults = multiHypResults;
+                    
+                    console.log('🎯 Draw-ahead after multi-hypothesis (no boost):', {
+                      topChar: finalResults[0]?.character,
+                      topScore: finalResults[0]?.score?.toFixed(2),
+                      bestHypothesis: multiHypResults[0]?.hypothesis
+                    });
+                    
+                    // Use multi-hypothesis results
+                    const resultsToProcess = Math.max(maxResults, 200);
+                    const topResults = finalResults.slice(0, resultsToProcess);
+                    
+                    // Convert each result to RecognitionResult with proper confidence calculation
+                    const recognitionResults: RecognitionResult[] = topResults.map((result, index) => {
+                      const confidence = this.calculateConfidence(finalResults, index);
+                      return {
+                        character: result.character,
+                        confidence: confidence,
+                        alternatives: [] // Empty for draw-ahead
+                      };
+                    });
+                    
+                    observer.next(recognitionResults);
+                    observer.complete();
+                  },
+                  error: (error) => {
+                    console.error('Multi-hypothesis error in draw-ahead, using standard results:', error);
+                    // Fall back to standard results
+                    const resultsToProcess = Math.max(maxResults, 200);
+                    const topResults = rawResults.slice(0, resultsToProcess);
+                    
+                    const recognitionResults: RecognitionResult[] = topResults.map((result, index) => {
+                      const confidence = this.calculateConfidence(rawResults, index);
+                      return {
+                        character: result.character,
+                        confidence: confidence,
+                        alternatives: []
+                      };
+                    });
+                    
+                    observer.next(recognitionResults);
+                    observer.complete();
+                  }
+                });
+                return; // Exit early, multi-hypothesis will complete the observer
+              }
+              
+              // Fast path: Use standard results (no boosting)
+              // Log top results
+              console.log(`Top ${Math.min(10, maxResults)} results (no boost):`, rawResults.slice(0, Math.min(10, maxResults)).map((r, i) => `${i+1}. ${r.character} (${r.score.toFixed(2)})`).join(', '));
+              
+              // For draw-ahead, return top raw results
+              // Prioritize characters that appeared in top 10 of unsorted results
+              const resultsToProcess = Math.max(maxResults, 200); // Still get enough results for confidence calculation
+              
+              // Get the top 10 unsorted set and array that were stored earlier
+              const storedTop10Set = (rawResults as any).__top10UnsortedSet as Set<string> | undefined;
+              const storedTop10Array = (rawResults as any).__top10Unsorted as string[] | undefined;
+              
+              console.log('[Recognition] Prioritization check:', {
+                hasStoredSet: !!storedTop10Set,
+                storedSetSize: storedTop10Set?.size || 0,
+                storedSetChars: storedTop10Set ? Array.from(storedTop10Set).slice(0, 5) : [],
+                storedArray: storedTop10Array?.slice(0, 5) || [],
+                rawResultsLength: rawResults.length
+              });
+              
+              // Split results into two groups: top 10 from unsorted, and the rest
+              const top10UnsortedResults: typeof rawResults = [];
+              const otherResults: typeof rawResults = [];
+              
+              if (storedTop10Set && storedTop10Array) {
+                for (const result of rawResults) {
+                  if (storedTop10Set.has(result.character)) {
+                    top10UnsortedResults.push(result);
+                  } else {
+                    otherResults.push(result);
+                  }
+                }
+                // Sort top10UnsortedResults by their original order in the unsorted list
+                top10UnsortedResults.sort((a, b) => {
+                  const aIndex = storedTop10Array.indexOf(a.character);
+                  const bIndex = storedTop10Array.indexOf(b.character);
+                  return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex);
+                });
+              } else {
+                // Fallback: if storedTop10Set not available, just use rawResults
+                otherResults.push(...rawResults);
+              }
+              
+              console.log('[Recognition] Prioritization result:', {
+                top10UnsortedCount: top10UnsortedResults.length,
+                top10UnsortedChars: top10UnsortedResults.map(r => r.character).slice(0, 5),
+                otherResultsCount: otherResults.length
+              });
+              
+              // Combine: top 10 from unsorted first, then the rest (both already sorted by score)
+              const prioritizedResults = [...top10UnsortedResults, ...otherResults].slice(0, resultsToProcess);
               
               // Convert each result to RecognitionResult with proper confidence calculation
-              const recognitionResults: RecognitionResult[] = topResults.map((result, index) => {
-                const confidence = this.calculateConfidence(validResults, index);
+              const recognitionResults: RecognitionResult[] = prioritizedResults.map((result, index) => {
+                // Use the original index in rawResults for confidence calculation
+                const originalIndex = rawResults.findIndex(r => r.character === result.character);
+                const confidence = originalIndex !== -1 ? this.calculateConfidence(rawResults, originalIndex) : this.calculateConfidence(prioritizedResults, index);
                 return {
                   character: result.character,
                   confidence: confidence,
@@ -555,10 +1117,7 @@ export class HandwritingRecognitionService {
                 };
               });
               
-              // Sort by confidence descending (highest first)
-              recognitionResults.sort((a, b) => b.confidence - a.confidence);
-              
-              console.log('Draw-ahead results (sorted by confidence):', recognitionResults.map(r => `${r.character} (${Math.round(r.confidence * 100)}%)`).join(', '));
+              console.log('Draw-ahead results (prioritizing top 10 from unsorted):', recognitionResults.slice(0, 20).map((r, i) => `${i+1}. ${r.character} (score: ${prioritizedResults[i].score.toFixed(2)}, confidence: ${Math.round(r.confidence * 100)}%)`).join(', '));
               observer.next(recognitionResults);
             } else {
               console.log('No results from HanziLookup (draw-ahead), trying fallback');
@@ -639,80 +1198,256 @@ export class HandwritingRecognitionService {
   }
 
   /**
-   * Normalize stroke coordinates to a standard size with improved preprocessing
+   * Normalizes strokes to 256x256 canvas while preserving aspect ratio
+   * Clean version without character-specific forced ratios
    * HanziLookup expects coordinates in 0-255 range (256x256 canvas)
    * Strokes are in format: [[[x, y], [x, y], ...], [[x, y], [x, y], ...], ...]
-   * Preserves aspect ratio and character proportions accurately
    */
   private normalizeStrokes(strokes: number[][][]): number[][][] {
     if (!strokes || strokes.length === 0) {
-      return [];
+      return strokes;
     }
 
-    // First, smooth strokes to reduce noise
-    const smoothedStrokes = strokes.map(stroke => this.smoothStroke(stroke));
+    // Optionally apply preprocessing pipeline: filter → smooth → simplify
+    // This happens BEFORE normalization to improve recognition accuracy
+    // Can be disabled for testing/comparison
+    const strokesToNormalize = this.usePreprocessing
+      ? this.strokePreprocessingService.preprocessStrokes(strokes)
+      : (console.log('[Recognition] Preprocessing bypassed - using raw strokes'), strokes);
     
-    // Find bounding box
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const bounds = this.getBoundingBox(strokesToNormalize);
+    const drawnWidth = bounds.maxX - bounds.minX;
+    const drawnHeight = bounds.maxY - bounds.minY;
+    const drawnAspectRatio = drawnWidth / drawnHeight;
     
-    smoothedStrokes.forEach(stroke => {
-      stroke.forEach(point => {
-        const x = point[0];
-        const y = point[1];
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
-      });
-    });
+    // Adaptive padding based on aspect ratio
+    let paddingX: number;
+    let paddingY: number;
+    let fillRatio: number;
     
-    // Calculate bounding box dimensions
-    const width = (maxX - minX) || 1;
-    const height = (maxY - minY) || 1;
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-    
-    // Target size for HanziLookup (256x256 canvas, coordinates 0-255)
-    const targetSize = 256;
-    
-    // Improved normalization: consistent approach that matches database format
-    // Key: characters should fill 60-80% of available canvas for best matching
-    const maxDim = Math.max(width, height);
-    const aspectRatio = width / height;
-    
-    // Use consistent padding that works well with database format
-    // Padding should be enough to avoid edge clipping but allow good use of space
-    const padding = 25;
-    const availableSize = targetSize - (padding * 2);
-    
-    // Calculate scale to fill target percentage of available space
-    // Target: 70% fill ratio for optimal matching with database
-    const targetFillRatio = 0.70;
-    const targetCharacterSize = availableSize * targetFillRatio;
-    
-    // Calculate scale needed to achieve target size
-    let scale = targetCharacterSize / maxDim;
-    
-    // Ensure minimum scale for very small characters
-    // But don't force too large - let natural scaling work
-    const minScale = 0.4;
-    const maxScale = 3.0; // Allow larger scale for very small input
-    const finalScale = Math.max(minScale, Math.min(maxScale, scale));
-    
-    // Validate final scale produces reasonable character size
-    const finalCharacterSize = maxDim * finalScale;
-    if (finalCharacterSize < availableSize * 0.5) {
-      // Character too small - increase scale
-      const adjustedScale = (availableSize * 0.5) / maxDim;
-      const normalized = this.normalizeStrokesWithScale(smoothedStrokes, centerX, centerY, Math.max(minScale, Math.min(maxScale, adjustedScale)), targetSize);
-      this.logNormalizationParameters(minX, minY, maxX, maxY, width, height, adjustedScale, padding, strokes.length, normalized);
-      return normalized;
+    if (drawnAspectRatio > 1.15) {
+      paddingX = 15;
+      paddingY = 25;
+      fillRatio = 0.85;
+    } else if (drawnAspectRatio < 0.7) {
+      paddingX = 25;
+      paddingY = 15;
+      fillRatio = 0.85;
+    } else {
+      paddingX = 25;
+      paddingY = 25;
+      fillRatio = 0.70;
     }
     
-    // Normalize strokes using the calculated scale
-    const normalized = this.normalizeStrokesWithScale(smoothedStrokes, centerX, centerY, finalScale, targetSize);
-    this.logNormalizationParameters(minX, minY, maxX, maxY, width, height, finalScale, padding, strokes.length, normalized);
-    return normalized;
+    const availableWidth = 256 - (2 * paddingX);
+    const availableHeight = 256 - (2 * paddingY);
+    const targetWidth = availableWidth * fillRatio;
+    const targetHeight = availableHeight * fillRatio;
+    
+    // Preserve aspect ratio
+    let scale: number;
+    
+    if (drawnAspectRatio > 1) {
+      scale = targetWidth / drawnWidth;
+      const testHeight = drawnHeight * scale;
+      if (testHeight > targetHeight) {
+        scale = targetHeight / drawnHeight;
+      }
+    } else {
+      scale = targetHeight / drawnHeight;
+      const testWidth = drawnWidth * scale;
+      if (testWidth > targetWidth) {
+        scale = targetWidth / drawnWidth;
+      }
+    }
+    
+    scale = Math.max(0.3, Math.min(4.0, scale));
+    
+    const scaledWidth = drawnWidth * scale;
+    const scaledHeight = drawnHeight * scale;
+    const offsetX = paddingX + (availableWidth - scaledWidth) / 2;
+    const offsetY = paddingY + (availableHeight - scaledHeight) / 2;
+    
+    return strokesToNormalize.map(stroke => 
+      stroke.map(point => [
+        (point[0] - bounds.minX) * scale + offsetX,
+        (point[1] - bounds.minY) * scale + offsetY
+      ])
+    );
+  }
+
+  /**
+   * Normalize strokes to a specific aspect ratio
+   * Used by multi-hypothesis to test different proportions
+   */
+  private normalizeWithTargetAspect(strokes: number[][][], targetAspect: number): number[][][] {
+    const bounds = this.getBoundingBox(strokes);
+    const drawnWidth = bounds.maxX - bounds.minX;
+    const drawnHeight = bounds.maxY - bounds.minY;
+    
+    const padding = 25;
+    const availableSize = 256 - (2 * padding);
+    
+    let scaledWidth: number;
+    let scaledHeight: number;
+    
+    if (targetAspect > 1) {
+      // Wide: width is limiting dimension
+      scaledWidth = availableSize * 0.85;
+      scaledHeight = scaledWidth / targetAspect;
+    } else {
+      // Tall or square: height is limiting
+      scaledHeight = availableSize * 0.85;
+      scaledWidth = scaledHeight * targetAspect;
+    }
+    
+    // Check bounds
+    if (scaledHeight > availableSize * 0.85) {
+      scaledHeight = availableSize * 0.85;
+      scaledWidth = scaledHeight * targetAspect;
+    }
+    if (scaledWidth > availableSize * 0.85) {
+      scaledWidth = availableSize * 0.85;
+      scaledHeight = scaledWidth / targetAspect;
+    }
+    
+    const scaleX = scaledWidth / drawnWidth;
+    const scaleY = scaledHeight / drawnHeight;
+    
+    const offsetX = padding + (availableSize - scaledWidth) / 2;
+    const offsetY = padding + (availableSize - scaledHeight) / 2;
+    
+    return strokes.map(stroke => 
+      stroke.map(point => [
+        (point[0] - bounds.minX) * scaleX + offsetX,
+        (point[1] - bounds.minY) * scaleY + offsetY
+      ])
+    );
+  }
+
+  /**
+   * Helper method to get bounding box of all strokes
+   */
+  private getBoundingBox(strokes: number[][][]): {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  } {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    
+    for (const stroke of strokes) {
+      for (const point of stroke) {
+        minX = Math.min(minX, point[0]);
+        minY = Math.min(minY, point[1]);
+        maxX = Math.max(maxX, point[0]);
+        maxY = Math.max(maxY, point[1]);
+      }
+    }
+    
+    return { minX, minY, maxX, maxY };
+  }
+
+  /**
+   * Detect if character is 大-like (3 strokes: horizontal + 2 diagonals)
+   */
+  private isDaLikeCharacter(strokes: number[][][]): boolean {
+    // Must be exactly 3 strokes
+    if (strokes.length !== 3) {
+      return false;
+    }
+    
+    const [stroke1, stroke2, stroke3] = strokes;
+    
+    // Stroke 1: Should be horizontal
+    const s1_isHorizontal = this.isHorizontalStroke(stroke1);
+    if (!s1_isHorizontal) {
+      return false;
+    }
+    
+    // Strokes 2 & 3: Should be diagonal and going in opposite directions
+    const s2_isDiagonal = this.isDiagonalStroke(stroke2);
+    const s3_isDiagonal = this.isDiagonalStroke(stroke3);
+    
+    if (!s2_isDiagonal || !s3_isDiagonal) {
+      return false;
+    }
+    
+    // Check if diagonals go in opposite directions
+    const s2_start = stroke2[0];
+    const s2_end = stroke2[stroke2.length - 1];
+    const s2_deltaX = s2_end[0] - s2_start[0];
+    
+    const s3_start = stroke3[0];
+    const s3_end = stroke3[stroke3.length - 1];
+    const s3_deltaX = s3_end[0] - s3_start[0];
+    
+    // One should go left (negative), one right (positive)
+    const oppositeDirX = (s2_deltaX * s3_deltaX) < 0;
+    
+    // Both should go down (positive Y)
+    const s2_deltaY = s2_end[1] - s2_start[1];
+    const s3_deltaY = s3_end[1] - s3_start[1];
+    const bothGoDown = s2_deltaY > 0 && s3_deltaY > 0;
+    
+    return oppositeDirX && bothGoDown;
+  }
+
+  /**
+   * Check if a stroke is primarily horizontal
+   */
+  private isHorizontalStroke(stroke: number[][]): boolean {
+    if (stroke.length < 2) return false;
+    const start = stroke[0];
+    const end = stroke[stroke.length - 1];
+    const deltaX = Math.abs(end[0] - start[0]);
+    const deltaY = Math.abs(end[1] - start[1]);
+    return deltaX > deltaY * 2; // Horizontal if width > 2× height
+  }
+
+  /**
+   * Check if a stroke is diagonal (not horizontal or vertical)
+   */
+  private isDiagonalStroke(stroke: number[][]): boolean {
+    if (stroke.length < 2) return false;
+    const start = stroke[0];
+    const end = stroke[stroke.length - 1];
+    const deltaX = Math.abs(end[0] - start[0]);
+    const deltaY = Math.abs(end[1] - start[1]);
+    if (deltaY === 0) return false; // Can't be diagonal if no vertical movement
+    const ratio = deltaX / deltaY;
+    return ratio > 0.3 && ratio < 3; // Diagonal if ratio between 0.3 and 3
+  }
+
+  /**
+   * Optional: Add diagnostic method to visualize normalized vs original
+   * Call this after normalization to see what's happening
+   */
+  private logStrokeGeometry(strokes: number[][][], label: string): void {
+    console.log(`[${label}] Stroke Geometry:`);
+    
+    strokes.forEach((stroke, i) => {
+      if (stroke.length < 2) return;
+      
+      const start = stroke[0];
+      const end = stroke[stroke.length - 1];
+      const deltaX = end[0] - start[0];
+      const deltaY = end[1] - start[1];
+      const length = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+      const angle = Math.atan2(deltaY, deltaX) * (180 / Math.PI);
+      
+      console.log(`  Stroke ${i + 1}:`, {
+        start: `(${start[0].toFixed(1)}, ${start[1].toFixed(1)})`,
+        end: `(${end[0].toFixed(1)}, ${end[1].toFixed(1)})`,
+        delta: `(${deltaX.toFixed(1)}, ${deltaY.toFixed(1)})`,
+        length: length.toFixed(1),
+        angle: angle.toFixed(1) + '°',
+        points: stroke.length
+      });
+    });
   }
 
   /**
@@ -783,6 +1518,325 @@ export class HandwritingRecognitionService {
         normalizedBounds: this.getNormalizedBounds(normalized)
       });
     }
+  }
+
+  /**
+   * Apply frequency boost to re-rank results based on character frequency
+   * DISABLED: No boosting applied - returns results as-is
+   */
+  private applyFrequencyBoost(results: Array<{character: string, score: number}>): Array<{character: string, score: number, originalScore?: number, boosted?: boolean}> {
+    // No boosting - return results unchanged
+    return results.map(result => ({
+      ...result,
+      originalScore: result.score,
+      score: result.score, // No boost applied
+      boosted: false
+    })).sort((a, b) => a.score - b.score); // Sort by original scores
+  }
+
+  /**
+   * Run HanziLookup recognition with pre-normalized strokes
+   * Returns Observable for integration with existing pipeline
+   */
+  private recognizeWithNormalizationObservable(
+    normalizedStrokes: number[][][],
+    looseness: number,
+    hypothesisName: string,
+    weight: number
+  ): Observable<Array<{character: string, score: number, weightedScore: number, hypothesis: string}>> {
+    return new Observable(observer => {
+      if (typeof HanziLookup === 'undefined' || !this.hanzilookupReady) {
+        observer.error(new Error('HanziLookup not ready'));
+        return;
+      }
+
+      try {
+        const analyzedChar = new HanziLookup.AnalyzedCharacter(normalizedStrokes);
+        const matcher = new HanziLookup.Matcher('mmah', looseness);
+        
+        matcher.match(analyzedChar, 500, (results: Array<{character: string, score: number}>) => {
+          const weighted = results.map(r => ({
+            character: r.character,
+            score: r.score,
+            weightedScore: r.score * weight,
+            hypothesis: hypothesisName
+          }));
+          observer.next(weighted);
+          observer.complete();
+        });
+      } catch (error) {
+        observer.error(error);
+      }
+    });
+  }
+
+  /**
+   * Normalize strokes without preprocessing (for multi-hypothesis)
+   */
+  private normalizeStrokesWithoutPreprocessing(strokes: number[][][]): number[][][] {
+    if (!strokes || strokes.length === 0) {
+      return strokes;
+    }
+    
+    const bounds = this.getBoundingBox(strokes);
+    const drawnWidth = bounds.maxX - bounds.minX;
+    const drawnHeight = bounds.maxY - bounds.minY;
+    const drawnAspectRatio = drawnWidth / drawnHeight;
+    
+    // Adaptive padding based on aspect ratio
+    let paddingX: number;
+    let paddingY: number;
+    let fillRatio: number;
+    
+    if (drawnAspectRatio > 1.15) {
+      paddingX = 15;
+      paddingY = 25;
+      fillRatio = 0.85;
+    } else if (drawnAspectRatio < 0.7) {
+      paddingX = 25;
+      paddingY = 15;
+      fillRatio = 0.85;
+    } else {
+      paddingX = 25;
+      paddingY = 25;
+      fillRatio = 0.70;
+    }
+    
+    const availableWidth = 256 - (2 * paddingX);
+    const availableHeight = 256 - (2 * paddingY);
+    const targetWidth = availableWidth * fillRatio;
+    const targetHeight = availableHeight * fillRatio;
+    
+    // Preserve aspect ratio
+    let scale: number;
+    
+    if (drawnAspectRatio > 1) {
+      scale = targetWidth / drawnWidth;
+      const testHeight = drawnHeight * scale;
+      if (testHeight > targetHeight) {
+        scale = targetHeight / drawnHeight;
+      }
+    } else {
+      scale = targetHeight / drawnHeight;
+      const testWidth = drawnWidth * scale;
+      if (testWidth > targetWidth) {
+        scale = targetWidth / drawnWidth;
+      }
+    }
+    
+    scale = Math.max(0.3, Math.min(4.0, scale));
+    
+    const scaledWidth = drawnWidth * scale;
+    const scaledHeight = drawnHeight * scale;
+    const offsetX = paddingX + (availableWidth - scaledWidth) / 2;
+    const offsetY = paddingY + (availableHeight - scaledHeight) / 2;
+    
+    return strokes.map(stroke => 
+      stroke.map(point => [
+        (point[0] - bounds.minX) * scale + offsetX,
+        (point[1] - bounds.minY) * scale + offsetY
+      ])
+    );
+  }
+
+  /**
+   * Test multiple aspect ratios and return best results
+   * Based on diagnostic: 1.47:1 works best, but also test 1.5:1 and 1.2:1
+   * Note: strokes should already be preprocessed before calling this
+   */
+  private recognizeWithMultipleHypotheses(
+    preprocessedStrokes: number[][][],
+    looseness: number
+  ): Observable<Array<{character: string, score: number, originalScore?: number, hypothesis?: string}>> {
+    console.log('🔬 Running multi-hypothesis recognition for better accuracy...');
+    
+    // Test 3 different normalizations based on diagnostic results
+    // Use normalizeStrokesWithoutPreprocessing to avoid double preprocessing
+    const hypotheses = [
+      {
+        name: 'preserve',
+        strokes: this.normalizeStrokesWithoutPreprocessing(preprocessedStrokes),
+        weight: 1.0,
+        description: 'Aspect-preserving'
+      },
+      {
+        name: 'wide-1.5',
+        strokes: this.normalizeWithTargetAspect(preprocessedStrokes, 1.5),
+        weight: 0.95,
+        description: 'Wide 1.5:1 (optimal for 大)'
+      },
+      {
+        name: 'wide-1.2',
+        strokes: this.normalizeWithTargetAspect(preprocessedStrokes, 1.2),
+        weight: 0.92,
+        description: 'Balanced 1.2:1'
+      }
+    ];
+    
+    // Run recognition on each hypothesis in parallel
+    const observables = hypotheses.map(hyp => 
+      this.recognizeWithNormalizationObservable(hyp.strokes, looseness, hyp.name, hyp.weight)
+    );
+    
+    return forkJoin(observables).pipe(
+      map((allResults: Array<Array<{character: string, score: number, weightedScore: number, hypothesis: string}>>) => {
+        // Flatten all results
+        const flatResults = allResults.flat();
+        
+        // Deduplicate: for each character, keep the best score across all hypotheses
+        const charMap = new Map<string, {score: number, hypothesis: string, originalScore: number}>();
+        
+        flatResults.forEach((r: {character: string, score: number, weightedScore: number, hypothesis: string}) => {
+          const existing = charMap.get(r.character);
+          if (!existing || r.weightedScore < existing.score) {
+            charMap.set(r.character, {
+              score: r.weightedScore,
+              hypothesis: r.hypothesis,
+              originalScore: r.score
+            });
+          }
+        });
+        
+        // Convert back to array and sort
+        const finalResults = Array.from(charMap.entries()).map(([char, data]) => ({
+          character: char,
+          score: data.score,
+          originalScore: data.originalScore,
+          hypothesis: data.hypothesis
+        }));
+        
+        finalResults.sort((a, b) => a.score - b.score);
+        
+        console.log('✅ Multi-hypothesis complete:', {
+          topChar: finalResults[0]?.character,
+          topScore: finalResults[0]?.score?.toFixed(2),
+          bestHypothesis: finalResults[0]?.hypothesis,
+          top10: finalResults.slice(0, 10).map(r => `${r.character}(${r.hypothesis}:${r.score.toFixed(2)})`)
+        });
+        
+        return finalResults;
+      })
+    );
+  }
+
+  /**
+   * Enhanced multi-hypothesis with 5 aspect ratios including 1.47:1 (diagnostic winner)
+   * Tests more variations for highest accuracy (takes ~250ms but highest accuracy)
+   * 
+   * TO USE ENHANCED VERSION:
+   * Replace recognizeWithMultipleHypotheses() calls with recognizeWithEnhancedHypotheses()
+   */
+  private recognizeWithEnhancedHypotheses(
+    preprocessedStrokes: number[][][],
+    looseness: number
+  ): Observable<Array<{character: string, score: number, originalScore?: number, hypothesis?: string}>> {
+    console.log('🔬🔬 Running ENHANCED multi-hypothesis with 5 variations...');
+    
+    const hypotheses = [
+      { 
+        name: 'preserve', 
+        strokes: this.normalizeStrokesWithoutPreprocessing(preprocessedStrokes), 
+        weight: 1.0 
+      },
+      { 
+        name: 'optimal-1.47', 
+        strokes: this.normalizeWithTargetAspect(preprocessedStrokes, 1.47), 
+        weight: 0.98 
+      }, // Diagnostic winner
+      { 
+        name: 'wide-1.5', 
+        strokes: this.normalizeWithTargetAspect(preprocessedStrokes, 1.5), 
+        weight: 0.95 
+      },
+      { 
+        name: 'balanced-1.2', 
+        strokes: this.normalizeWithTargetAspect(preprocessedStrokes, 1.2), 
+        weight: 0.92 
+      },
+      { 
+        name: 'square-1.0', 
+        strokes: this.normalizeWithTargetAspect(preprocessedStrokes, 1.0), 
+        weight: 0.88 
+      }
+    ];
+    
+    // Run recognition on each hypothesis in parallel
+    const observables = hypotheses.map(hyp => 
+      this.recognizeWithNormalizationObservable(hyp.strokes, looseness, hyp.name, hyp.weight)
+    );
+    
+    return forkJoin(observables).pipe(
+      map((allResults: Array<Array<{character: string, score: number, weightedScore: number, hypothesis: string}>>) => {
+        // Flatten all results
+        const flatResults = allResults.flat();
+        
+        // Deduplicate: for each character, keep the best score across all hypotheses
+        const charMap = new Map<string, {score: number, hypothesis: string, originalScore: number}>();
+        
+        flatResults.forEach((r: {character: string, score: number, weightedScore: number, hypothesis: string}) => {
+          const existing = charMap.get(r.character);
+          if (!existing || r.weightedScore < existing.score) {
+            charMap.set(r.character, {
+              score: r.weightedScore,
+              hypothesis: r.hypothesis,
+              originalScore: r.score
+            });
+          }
+        });
+        
+        // Convert back to array and sort
+        const finalResults = Array.from(charMap.entries()).map(([char, data]) => ({
+          character: char,
+          score: data.score,
+          originalScore: data.originalScore,
+          hypothesis: data.hypothesis
+        }));
+        
+        finalResults.sort((a, b) => a.score - b.score);
+        
+        console.log('✅✅ Enhanced multi-hypothesis complete:', {
+          topChar: finalResults[0]?.character,
+          topScore: finalResults[0]?.score?.toFixed(2),
+          bestHypothesis: finalResults[0]?.hypothesis,
+          top5: finalResults.slice(0, 5).map(r => `${r.character}(${r.hypothesis})`)
+        });
+        
+        return finalResults;
+      })
+    );
+  }
+
+  /**
+   * Decide if we should retry with multi-hypothesis
+   * 
+   * Criteria:
+   * 1. Must be 3-stroke character (where 大 lives)
+   * 2. Top result has poor confidence (score > 1.8 after frequency boost)
+   */
+  private shouldRetryWithMultiHypothesis(results: any[], strokeCount: number): boolean {
+    // Only for 3-stroke characters
+    if (strokeCount !== 3) {
+      return false;
+    }
+    
+    // Must have results
+    if (results.length === 0) {
+      return true; // If no results, definitely retry
+    }
+    
+    // Check top result confidence
+    const topScore = results[0].score;
+    
+    // If top score is poor (>1.8 after boost), retry
+    // Note: Lower score = better match in HanziLookup
+    const CONFIDENCE_THRESHOLD = 1.8;
+    
+    if (topScore > CONFIDENCE_THRESHOLD) {
+      console.log(`📊 Top score ${topScore.toFixed(2)} exceeds threshold ${CONFIDENCE_THRESHOLD}, will retry`);
+      return true;
+    }
+    
+    return false;
   }
 
   /**
@@ -1215,5 +2269,333 @@ export class HandwritingRecognitionService {
       confidence: 0,
       alternatives: []
     };
+  }
+
+  // ============================================================================
+  // DIAGNOSTIC METHODS: Test Multiple 大 Variants Against Database
+  // ============================================================================
+
+  /**
+   * Test different 大 proportions to find which matches database best
+   * Call this from ngOnInit or add a diagnostic button
+   */
+  public testDaVariants(): void {
+    console.log('\n╔════════════════════════════════════════════════════════════╗');
+    console.log('║         TESTING 大 VARIANTS AGAINST DATABASE               ║');
+    console.log('╚════════════════════════════════════════════════════════════╝\n');
+    
+    // Create different proportions of 大
+    const variants = [
+      {
+        name: 'Wide Sprawling (2:1 aspect)',
+        description: 'Very wide horizontal, diagonals spread far',
+        strokes: [
+          [[40, 80], [216, 80]],       // Wide horizontal (176px)
+          [[128, 80], [40, 200]],      // Left diagonal: 88px left, 120px down
+          [[128, 80], [216, 200]]      // Right diagonal: 88px right, 120px down
+        ]
+      },
+      {
+        name: 'Medium Wide (1.5:1 aspect)',
+        description: 'Moderately wide, balanced spread',
+        strokes: [
+          [[60, 80], [196, 80]],       // Medium horizontal (136px)
+          [[128, 80], [60, 200]],      // Left diagonal: 68px left, 120px down
+          [[128, 80], [196, 200]]      // Right diagonal: 68px right, 120px down
+        ]
+      },
+      {
+        name: 'Balanced (1.25:1 aspect)',
+        description: 'Slightly wider than tall, typical handwriting',
+        strokes: [
+          [[70, 80], [186, 80]],       // Balanced horizontal (116px)
+          [[128, 80], [70, 176]],      // Left diagonal: 58px left, 96px down
+          [[128, 80], [186, 176]]      // Right diagonal: 58px right, 96px down
+        ]
+      },
+      {
+        name: 'Narrow (1:1 aspect)',
+        description: 'Square proportions',
+        strokes: [
+          [[88, 80], [168, 80]],       // Narrow horizontal (80px)
+          [[128, 80], [88, 200]],      // Left diagonal: 40px left, 120px down
+          [[128, 80], [168, 200]]      // Right diagonal: 40px right, 120px down
+        ]
+      },
+      {
+        name: 'Tall (1:1.5 aspect)',
+        description: 'Taller than wide, steep diagonals',
+        strokes: [
+          [[80, 60], [176, 60]],       // Short horizontal (96px)
+          [[128, 60], [90, 220]],      // Left diagonal: 38px left, 160px down
+          [[128, 60], [166, 220]]      // Right diagonal: 38px right, 160px down
+        ]
+      },
+      {
+        name: 'Your Recent Draw',
+        description: 'Based on your last attempt (aspect 1.7:1)',
+        strokes: [
+          [[44, 80], [221, 80]],       // Your horizontal (177px)
+          [[128, 80], [54, 180]],      // Your left diagonal: 74px left, 100px down
+          [[128, 80], [202, 180]]      // Your right diagonal: 74px right, 100px down
+        ]
+      }
+    ];
+    
+    const results: any[] = [];
+    let completedTests = 0;
+    
+    // Test each variant
+    variants.forEach((variant, index) => {
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`VARIANT ${index + 1}: ${variant.name}`);
+      console.log(`${variant.description}`);
+      console.log(`${'='.repeat(60)}`);
+      
+      // Calculate original proportions
+      const bounds = this.getBoundingBox(variant.strokes);
+      const width = bounds.maxX - bounds.minX;
+      const height = bounds.maxY - bounds.minY;
+      const aspectRatio = width / height;
+      
+      console.log(`\nOriginal proportions:`);
+      console.log(`  Width: ${width.toFixed(1)}px`);
+      console.log(`  Height: ${height.toFixed(1)}px`);
+      console.log(`  Aspect ratio: ${aspectRatio.toFixed(2)}:1`);
+      
+      // Normalize using current algorithm
+      const normalized = this.normalizeStrokes(variant.strokes);
+      
+      // Log normalized geometry
+      this.logStrokeGeometry(normalized, `Normalized ${variant.name}`);
+      
+      // Test with HanziLookup
+      if (typeof HanziLookup !== 'undefined' && this.hanzilookupReady) {
+        try {
+          const analyzedChar = new HanziLookup.AnalyzedCharacter(normalized);
+          const looseness = 0.175; // Use current looseness for 3-stroke
+          const matcher = new HanziLookup.Matcher('mmah', looseness);
+          
+          matcher.match(analyzedChar, 500, (matchResults: Array<{character: string, score: number}>) => {
+            // Filter valid results and sort by score (lower = better)
+            const validResults = matchResults.filter(r => 
+              r.score !== -Infinity && 
+              r.score !== Infinity && 
+              !isNaN(r.score) &&
+              isFinite(r.score)
+            );
+            
+            // Sort by score ascending (lower score = better match)
+            validResults.sort((a, b) => a.score - b.score);
+            
+            // Find 大 in sorted results
+            const daResult = validResults.find((r: any) => r.character === '大');
+            const daRank = daResult ? validResults.indexOf(daResult) + 1 : -1;
+            const daScore = daResult ? daResult.score : 'N/A';
+            
+            console.log(`\n📊 RESULTS:`);
+            console.log(`  大 rank: ${daRank === -1 ? 'NOT FOUND' : `${daRank} of ${validResults.length}`}`);
+            console.log(`  大 score: ${typeof daScore === 'number' ? daScore.toFixed(2) : daScore}`);
+            console.log(`  Top 5 matches: ${validResults.slice(0, 5).map((r: any) => `${r.character}(${r.score.toFixed(2)})`).join(', ')}`);
+            
+            // Store result with variant index to maintain order
+            const result = {
+              variant: variant.name,
+              rank: daRank,
+              score: daScore,
+              aspectRatio: aspectRatio,
+              top5: validResults.slice(0, 5).map((r: any) => r.character).join(', '),
+              variantIndex: index // Store index to maintain order
+            };
+            
+            results.push(result);
+            
+            completedTests++;
+            
+            console.log(`\nProgress: ${completedTests}/${variants.length} tests completed`);
+            
+            // Print summary after all tests complete
+            if (completedTests === variants.length) {
+              // Sort results by variant index to maintain original order
+              results.sort((a, b) => (a.variantIndex || 0) - (b.variantIndex || 0));
+              this.printDiagnosticSummary(results);
+            }
+          });
+        } catch (error) {
+          console.error(`Error testing variant ${variant.name}:`, error);
+          results.push({
+            variant: variant.name,
+            rank: -1,
+            score: 'ERROR',
+            aspectRatio: aspectRatio,
+            top5: 'N/A',
+            variantIndex: index
+          });
+          completedTests++;
+          console.log(`\nProgress: ${completedTests}/${variants.length} tests completed`);
+          if (completedTests === variants.length) {
+            results.sort((a, b) => (a.variantIndex || 0) - (b.variantIndex || 0));
+            this.printDiagnosticSummary(results);
+          }
+        }
+      } else {
+        console.warn('HanziLookup not ready');
+        results.push({
+          variant: variant.name,
+          rank: -1,
+          score: 'NOT READY',
+          aspectRatio: aspectRatio,
+          top5: 'N/A',
+          variantIndex: index
+        });
+        completedTests++;
+        console.log(`\nProgress: ${completedTests}/${variants.length} tests completed`);
+        if (completedTests === variants.length) {
+          results.sort((a, b) => (a.variantIndex || 0) - (b.variantIndex || 0));
+          this.printDiagnosticSummary(results);
+        }
+      }
+    });
+  }
+
+  /**
+   * Print summary of diagnostic results
+   */
+  private printDiagnosticSummary(results: any[]): void {
+    console.log('\n\n');
+    console.log('╔════════════════════════════════════════════════════════════╗');
+    console.log('║                    DIAGNOSTIC SUMMARY                      ║');
+    console.log('╚════════════════════════════════════════════════════════════╝\n');
+    
+    // Check if we have any results
+    if (results.length === 0) {
+      console.log('❌ No test results available!');
+      return;
+    }
+    
+    // Sort by rank (best first), but keep those with rank -1 at the end
+    const withRank = results.filter(r => r.rank !== -1);
+    const withoutRank = results.filter(r => r.rank === -1);
+    const sorted = [...withRank.sort((a, b) => a.rank - b.rank), ...withoutRank];
+    
+    if (withRank.length === 0) {
+      console.log('❌ 大 was NOT FOUND in any variant!');
+      console.log('   This suggests a fundamental database incompatibility.');
+      console.log('\n📋 All variants tested:\n');
+      results.forEach((result, i) => {
+        console.log(`   ${i + 1}. ${result.variant} (aspect: ${result.aspectRatio.toFixed(2)}:1) - NOT FOUND`);
+      });
+      return;
+    }
+    
+    console.log('📈 Results ranked by 大 performance:\n');
+    console.log('Rank | Variant                    | 大 Rank | Score | Aspect | Top 5 Matches');
+    console.log('-----|----------------------------|---------|-------|--------|------------------');
+    
+    sorted.forEach((result, i) => {
+      const rank = String(i + 1).padStart(4);
+      const variant = result.variant.padEnd(26);
+      const daRank = result.rank === -1 ? 'NOT FOUND'.padStart(7) : String(result.rank).padStart(7);
+      const score = typeof result.score === 'number' ? result.score.toFixed(2) : (result.score || 'N/A');
+      const scoreStr = String(score).padStart(5);
+      const aspect = result.aspectRatio ? result.aspectRatio.toFixed(2).padStart(6) : 'N/A'.padStart(6);
+      const top5 = result.top5 || 'N/A';
+      
+      console.log(`${rank} | ${variant} | ${daRank} | ${scoreStr} | ${aspect} | ${top5}`);
+    });
+    
+    // Find best variant
+    const best = sorted[0];
+    console.log('\n\n🏆 WINNER:');
+    console.log(`   ${best.variant}`);
+    console.log(`   大 ranked: #${best.rank}`);
+    console.log(`   Score: ${typeof best.score === 'number' ? best.score.toFixed(2) : best.score}`);
+    console.log(`   Aspect ratio: ${best.aspectRatio.toFixed(2)}:1`);
+    
+    // Recommendations
+    console.log('\n\n💡 RECOMMENDATIONS:\n');
+    
+    if (best.rank <= 20) {
+      console.log('✅ Good news! A variant ranks in top 20.');
+      console.log(`   Target aspect ratio: ${best.aspectRatio.toFixed(2)}:1`);
+      console.log('   Action: Adjust normalization to force this aspect ratio for 大-like characters');
+    } else if (best.rank <= 50) {
+      console.log(`⚠️  Best variant ranks ${best.rank}th - marginal.`);
+      console.log('   Options:');
+      console.log('   1. Force aspect ratio + increase looseness to 0.20+');
+      console.log('   2. Add post-processing boost for 大');
+      console.log('   3. Consider alternative recognition library');
+    } else {
+      console.log(`❌ Even best variant ranks poorly (${best.rank}th).`);
+      console.log('   This suggests database incompatibility.');
+      console.log('   Recommended: Add post-processing boost or use different database');
+    }
+    
+    // Compare with user's drawing
+    const userVariant = results.find(r => r.variant === 'Your Recent Draw');
+    if (userVariant && userVariant.rank !== -1) {
+      console.log(`\n   Your drawing ranked: #${userVariant.rank}`);
+      if (userVariant.rank > best.rank) {
+        const diff = userVariant.rank - best.rank;
+        console.log(`   Gap from best: ${diff} positions`);
+        console.log(`   Your aspect (${userVariant.aspectRatio.toFixed(2)}:1) vs best (${best.aspectRatio.toFixed(2)}:1)`);
+      }
+    }
+    
+    console.log('\n');
+  }
+
+  /**
+   * Simpler test - just log what current normalization does to ideal 大
+   */
+  public quickDiagnostic(): void {
+    console.log('\n=== QUICK DIAGNOSTIC: Ideal 大 ===\n');
+    
+    // Perfect 大 proportions
+    const idealDa: number[][][] = [
+      [[70, 80], [186, 80]],      // Horizontal
+      [[128, 80], [70, 176]],     // Left diagonal
+      [[128, 80], [186, 176]]      // Right diagonal
+    ];
+    
+    console.log('Input (ideal 大):');
+    console.log('  Horizontal: 70→186 (116px wide)');
+    console.log('  Left diagonal: 128→70 (58px left), 80→176 (96px down)');
+    console.log('  Right diagonal: 128→186 (58px right), 80→176 (96px down)');
+    console.log('  Aspect ratio: 1.21:1');
+    
+    const normalized = this.normalizeStrokes(idealDa);
+    
+    console.log('\nAfter normalization:');
+    this.logStrokeGeometry(normalized, 'Normalized Ideal 大');
+    
+    // Test it
+    if (typeof HanziLookup !== 'undefined' && this.hanzilookupReady) {
+      try {
+        const analyzedChar = new HanziLookup.AnalyzedCharacter(normalized);
+        const looseness = 0.175;
+        const matcher = new HanziLookup.Matcher('mmah', looseness);
+        
+        matcher.match(analyzedChar, 500, (results: Array<{character: string, score: number}>) => {
+          const daResult = results.find((r: any) => r.character === '大');
+          const daRank = daResult ? results.indexOf(daResult) + 1 : -1;
+          
+          console.log('\nMatching result:');
+          console.log(`  大 rank: ${daRank === -1 ? 'NOT FOUND' : daRank}`);
+          console.log(`  大 score: ${daResult ? daResult.score.toFixed(2) : 'N/A'}`);
+          console.log(`  Top 10: ${results.slice(0, 10).map((r: any) => r.character).join(' ')}`);
+          
+          if (daRank === -1 || daRank > 20) {
+            console.log('\n❌ Even ideal proportions fail! Database issue confirmed.');
+          } else {
+            console.log('\n✅ Ideal proportions work! Problem is in user drawing or normalization.');
+          }
+        });
+      } catch (error) {
+        console.error('Error in quick diagnostic:', error);
+      }
+    } else {
+      console.warn('HanziLookup not ready');
+    }
   }
 }
